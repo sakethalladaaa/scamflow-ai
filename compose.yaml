@@ -1,0 +1,15 @@
+services:
+  scamflow:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      SCAMFLOW_ENVIRONMENT: development
+      SCAMFLOW_DATABASE_PATH: /data/scamflow.sqlite3
+      SCAMFLOW_TRUSTED_ORIGIN: http://127.0.0.1:8000
+      PORT: "8000"
+    volumes:
+      - scamflow-data:/data
+
+volumes:
+  scamflow-data:

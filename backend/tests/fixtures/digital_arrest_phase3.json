@@ -1,0 +1,198 @@
+{
+  "fixture_set": "phase3-digital-arrest-development-v1",
+  "purpose": "Disclosed synthetic development fixtures for extractor and deterministic-policy tests. These are not a frozen held-out evaluation set.",
+  "provenance": "Synthetic text authored for ScamFlow AI Phase 3 development. No real victim data, private messages, or benchmark labels are used as detector input.",
+  "offset_semantics": {
+    "base": 0,
+    "end": "exclusive",
+    "indexing": "Python Unicode string indexing over exact original stored text"
+  },
+  "families": [
+    {
+      "family_id": "da-dev-001-authority-threat-isolation",
+      "rationale": "Demonstrates a warning before any payment request when asserted authority, coercion, and isolation combine across ordered messages.",
+      "payment_context": {
+        "stated_purpose": "Account verification",
+        "amount": "5000",
+        "recipient_reference": "synthetic-recipient-1"
+      },
+      "events": [
+        {
+          "event_id": "evt-1",
+          "channel": "call_transcript",
+          "source_order": 1,
+          "text": "I am a police officer."
+        },
+        {
+          "event_id": "evt-2",
+          "channel": "call_transcript",
+          "source_order": 2,
+          "text": "You will be arrested."
+        },
+        {
+          "event_id": "evt-3",
+          "channel": "call_transcript",
+          "source_order": 3,
+          "text": "Stay on the call."
+        }
+      ],
+      "expected_observations": [
+        {
+          "tactic": "authority_claim",
+          "event_id": "evt-1",
+          "quote": "police officer",
+          "start": 7,
+          "end": 21,
+          "context": "asserted"
+        },
+        {
+          "tactic": "threat_coercion",
+          "event_id": "evt-2",
+          "quote": "You will be arrested",
+          "start": 0,
+          "end": 20,
+          "context": "asserted"
+        },
+        {
+          "tactic": "isolation",
+          "event_id": "evt-3",
+          "quote": "Stay on the call",
+          "start": 0,
+          "end": 16,
+          "context": "asserted"
+        }
+      ],
+      "expected_prefix_states": [
+        {
+          "through_source_order": 1,
+          "state": "no_strong_indicators"
+        },
+        {
+          "through_source_order": 2,
+          "state": "needs_clarification_or_review"
+        },
+        {
+          "through_source_order": 3,
+          "state": "high_risk_indicators"
+        }
+      ]
+    },
+    {
+      "family_id": "da-dev-002-transfer-demand",
+      "rationale": "Demonstrates a coercive authority claim combined with a verification transfer demand.",
+      "payment_context": {
+        "stated_purpose": "Verification transfer",
+        "amount": "12500",
+        "recipient_reference": "synthetic-recipient-2"
+      },
+      "events": [
+        {
+          "event_id": "evt-1",
+          "channel": "whatsapp",
+          "source_order": 1,
+          "text": "I am a cyber crime officer."
+        },
+        {
+          "event_id": "evt-2",
+          "channel": "whatsapp",
+          "source_order": 2,
+          "text": "You will be arrested."
+        },
+        {
+          "event_id": "evt-3",
+          "channel": "whatsapp",
+          "source_order": 3,
+          "text": "Transfer money for verification."
+        }
+      ],
+      "expected_observations": [
+        {
+          "tactic": "authority_claim",
+          "event_id": "evt-1",
+          "quote": "cyber crime officer",
+          "start": 7,
+          "end": 26,
+          "context": "asserted"
+        },
+        {
+          "tactic": "threat_coercion",
+          "event_id": "evt-2",
+          "quote": "You will be arrested",
+          "start": 0,
+          "end": 20,
+          "context": "asserted"
+        },
+        {
+          "tactic": "verification_transfer_request",
+          "event_id": "evt-3",
+          "quote": "Transfer money for verification",
+          "start": 0,
+          "end": 31,
+          "context": "asserted"
+        }
+      ],
+      "expected_prefix_states": [
+        {
+          "through_source_order": 1,
+          "state": "no_strong_indicators"
+        },
+        {
+          "through_source_order": 2,
+          "state": "needs_clarification_or_review"
+        },
+        {
+          "through_source_order": 3,
+          "state": "high_risk_indicators"
+        }
+      ]
+    },
+    {
+      "family_id": "da-dev-003-awareness-warning",
+      "rationale": "Ensures quoted scam-awareness language remains traceable but is not treated as an active threat.",
+      "payment_context": {
+        "stated_purpose": "Awareness review",
+        "amount": null,
+        "recipient_reference": null
+      },
+      "events": [
+        {
+          "event_id": "evt-1",
+          "channel": "sms",
+          "source_order": 1,
+          "text": "Scam warning: a scammer may say I am a police officer, you will be arrested, and stay on the call."
+        }
+      ],
+      "expected_prefix_states": [
+        {
+          "through_source_order": 1,
+          "state": "no_strong_indicators"
+        }
+      ]
+    },
+    {
+      "family_id": "da-dev-004-benign-procedure",
+      "rationale": "Demonstrates a successfully processed supported benign input with an empty observation set.",
+      "payment_context": {
+        "stated_purpose": "Document submission",
+        "amount": null,
+        "recipient_reference": "branch-reference"
+      },
+      "events": [
+        {
+          "event_id": "evt-1",
+          "channel": "sms",
+          "source_order": 1,
+          "text": "Your appointment confirmed. Reference number ABC-123. Please visit the branch."
+        }
+      ],
+      "expected_observations": [],
+      "expected_prefix_states": [
+        {
+          "through_source_order": 1,
+          "state": "no_strong_indicators"
+        }
+      ]
+    }
+  ],
+  "evaluation_reservation": "Independent scenario families must be reserved for Phase 7/8 evaluation and must not be added to this development fixture set."
+}

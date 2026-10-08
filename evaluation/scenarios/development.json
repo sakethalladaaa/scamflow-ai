@@ -1,0 +1,35 @@
+{
+  "dataset": "synthetic-development-v1",
+  "provenance": "Hand-authored synthetic scenarios for deterministic mock contract testing.",
+  "scenarios": [
+    {
+      "family_id": "dev-digital-arrest-progression",
+      "payment_context": {"stated_purpose": "Verification", "amount_decimal": "25000", "recipient_reference": "Unknown UPI"},
+      "events": [
+        {"event_id": "da-1", "channel": "call_transcript", "text": "I am a cyber crime officer. Your account is under investigation.", "source_order": 1},
+        {"event_id": "da-2", "channel": "call_transcript", "text": "You will be arrested. Stay on the call.", "source_order": 2}
+      ],
+      "expected_behaviour": "high_risk_indicators",
+      "expected_first_warning_stage": 1
+    },
+    {
+      "family_id": "dev-fake-refund-advance-fee",
+      "payment_context": {"stated_purpose": "Refund", "amount_decimal": "499", "recipient_reference": "Personal UPI"},
+      "events": [
+        {"event_id": "fr-1", "channel": "whatsapp", "text": "Your refund is ready.", "source_order": 1},
+        {"event_id": "fr-2", "channel": "whatsapp", "text": "Pay a processing fee to receive your refund.", "source_order": 2}
+      ],
+      "expected_behaviour": "high_risk_indicators",
+      "expected_first_warning_stage": 2
+    },
+    {
+      "family_id": "dev-legitimate-refund-control",
+      "payment_context": {"stated_purpose": "Merchant refund", "amount_decimal": null, "recipient_reference": null},
+      "events": [
+        {"event_id": "lr-1", "channel": "email", "text": "Your refund will return to the original payment method. No fee is required for this refund.", "source_order": 1}
+      ],
+      "expected_behaviour": "no_strong_indicators",
+      "expected_first_warning_stage": null
+    }
+  ]
+}
