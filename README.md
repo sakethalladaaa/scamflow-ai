@@ -252,22 +252,22 @@ remain operator responsibilities.
 
 ## Verification
 
-The latest repository verification completed successfully:
+The latest local verification on 2026-10-25 completed with these results:
 
 | Check | Result |
 | --- | --- |
-| Backend test suite | 133 passed |
+| Backend test suite | 159 passed |
 | Ruff | Passed |
 | Python dependency check | No broken requirements |
-| Frontend unit tests | 4 files, 8 tests passed |
+| Frontend unit tests | 6 files, 51 tests passed |
 | TypeScript typecheck | Passed |
 | Production frontend build | Passed |
-| npm audit | 0 vulnerabilities |
+| npm audit | Failed: 6 development-toolchain advisories; production dependency audit remains separate |
 | Chromium E2E | 2 tests passed |
-| Same-key append stress check | 100/100 passed |
+| Same-key append stress check | Not rerun in this release pass |
 | Development evaluation fixtures | 3/3 deterministic mock conformance |
-| Hosted browser smoke | Secure/HttpOnly cookie, CSRF, assessment, and deletion passed |
-| Railway deployment health | Healthy |
+| Hosted browser smoke | Not verified in this release pass |
+| Railway deployment health | Blocked: Railway CLI is installed but not authenticated or linked to a project |
 
 Run the checks:
 
@@ -293,8 +293,10 @@ They are not real-model recall, precision, or accuracy results.
 
 ## Deployment
 
-The development MVP is hosted on Railway at
-[scamflow-ai-production.up.railway.app](https://scamflow-ai-production.up.railway.app).
+The repository contains Railway infrastructure declarations, but this checkout
+has not verified a live deployment. Authenticate and link the intended Railway
+project before applying [.railway/railway.ts](.railway/railway.ts); the historical
+demo URL is not a current health or provenance claim.
 The current topology uses:
 
 - one application replica;

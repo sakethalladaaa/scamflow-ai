@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -512,7 +512,7 @@ def assess_case(
                 extraction_version=extractor.version,
             )
             observations = validated.observations
-            decision = decide_digital_arrest(validated)
+            decision = decide_digital_arrest(validated, snapshot=snapshot)
         except ExtractionValidationError:
             decision = _failure_decision(
                 reason_code="invalid_extraction_evidence",
@@ -695,13 +695,22 @@ def get_latest_assessment(
             case_id=case_id,
             now=now,
         )
+        order_by_clauses = [
+            Assessment.created_at.desc(),
+            Assessment.assessed_revision.desc(),
+        ]
+        if session.get_bind().dialect.name == "sqlite":
+            order_by_clauses.append(text("assessments.rowid DESC"))
+        else:
+            order_by_clauses.append(Assessment.id.desc())
+
         assessment = session.scalar(
             select(Assessment)
             .where(
                 Assessment.case_id == case.id,
                 Assessment.owner_id == owner_id,
             )
-            .order_by(Assessment.created_at.desc(), Assessment.id.desc())
+            .order_by(*order_by_clauses)
             .limit(1)
         )
         if assessment is None:

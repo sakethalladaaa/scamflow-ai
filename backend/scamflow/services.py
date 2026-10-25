@@ -22,6 +22,7 @@ from .models import (
     Event,
     IdempotencyRecord,
     OwnerSession,
+    ReviewRequestIdempotencyRecord,
 )
 from .schemas import MAX_EVENTS, MAX_TOTAL_INPUT_CHARACTERS, PaymentContext
 from .security import generate_session_token, hash_session_token
@@ -528,6 +529,18 @@ def delete_case(
             .values(
                 target_case_id=None,
                 assessment_id=None,
+                resource_deleted=True,
+            )
+        )
+        session.execute(
+            update(ReviewRequestIdempotencyRecord)
+            .where(
+                ReviewRequestIdempotencyRecord.owner_id == owner_id,
+                ReviewRequestIdempotencyRecord.target_case_id == case.id,
+            )
+            .values(
+                target_case_id=None,
+                review_request_id=None,
                 resource_deleted=True,
             )
         )

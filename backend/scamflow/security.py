@@ -9,6 +9,7 @@ from fastapi import Request
 SESSION_COOKIE_NAME = "scamflow_session"
 CSRF_HEADER_NAME = "X-ScamFlow-CSRF"
 CSRF_HEADER_VALUE = "1"
+REVIEWER_HEADER_NAME = "X-ScamFlow-Reviewer-Token"
 SESSION_TOKEN_BYTES = 32
 
 
@@ -28,6 +29,15 @@ def token_hash_matches(token: str, expected_hash: str) -> bool:
     """Compare a presented token to a stored hash in constant time."""
 
     return hmac.compare_digest(hash_session_token(token), expected_hash)
+
+
+def reviewer_token_matches(presented_token: str, configured_token: str) -> bool:
+    """Compare an explicit reviewer credential in constant time."""
+
+    return bool(presented_token) and hmac.compare_digest(
+        presented_token.encode("utf-8"),
+        configured_token.encode("utf-8"),
+    )
 
 
 def request_has_valid_csrf_context(request: Request, trusted_origin: str) -> bool:

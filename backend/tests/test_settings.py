@@ -8,7 +8,12 @@ from backend.scamflow.settings import Environment, LogLevel, Settings
 
 @pytest.fixture(autouse=True)
 def clear_scamflow_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("SCAMFLOW_ENVIRONMENT", "SCAMFLOW_LOG_LEVEL", "SCAMFLOW_SECURE_COOKIES"):
+    for name in (
+        "SCAMFLOW_ENVIRONMENT",
+        "SCAMFLOW_LOG_LEVEL",
+        "SCAMFLOW_SECURE_COOKIES",
+        "SCAMFLOW_REVIEWER_TOKEN",
+    ):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -27,6 +32,17 @@ def test_settings_environment_overrides(monkeypatch: pytest.MonkeyPatch) -> None
 
     assert settings.environment is Environment.TEST
     assert settings.log_level is LogLevel.DEBUG
+
+
+def test_reviewer_token_loads_from_environment_as_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    token = "environment-configured-reviewer-token"
+    monkeypatch.setenv("SCAMFLOW_REVIEWER_TOKEN", token)
+
+    settings = Settings()
+
+    assert settings.reviewer_token is not None
+    assert settings.reviewer_token.get_secret_value() == token
+    assert token not in str(settings.reviewer_token)
 
 
 @pytest.mark.parametrize(

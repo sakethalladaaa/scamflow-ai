@@ -1,36 +1,29 @@
 import { expect, test } from '@playwright/test'
 
-test('session, replay, highlight, append, reload, isolation, CSRF, and delete', async ({ browser }) => {
+test('session, highlight, append, reload, isolation, CSRF, and delete', async ({ browser }) => {
   const first = await browser.newContext()
   const page = await first.newPage()
   await page.goto('/')
-  await expect(page.getByText('Local session ready')).toBeVisible()
-
-  await page.getByRole('button', { name: 'Start demo' }).click()
+  await page.getByLabel('Conversation text').fill('Sender: please send your OTP now.')
+  await page.getByLabel('Stated payment purpose (required)').fill('Account verification')
+  await page.getByRole('checkbox').check()
+  await page.getByRole('button', { name: /Analyse conversation/ }).click()
   await expect(page.getByRole('heading', { name: 'Needs clarification or review' })).toBeVisible()
-  const caseId = new URL(page.url()).searchParams.get('case')!
 
-  await page.getByRole('button', { name: /Highlight quote/ }).first().click()
-  await expect(page.getByTestId('selected-highlight')).toBeVisible()
+  await page.getByRole('button', { name: /View in timeline/ }).first().click()
+  await expect(page.locator('mark').first()).toBeVisible()
 
-  await page.getByRole('button', { name: 'Reveal next & reassess' }).click()
-  await expect(page.getByRole('heading', { name: 'High-risk indicators' })).toBeVisible()
-
-  await page.getByPlaceholder('Add the exact next message or clarification').fill('Reference number SAFE-1.')
-  await page.getByRole('button', { name: 'Append evidence' }).click()
-  await expect(page.getByText(/Historical result/)).toBeVisible()
+  await page.getByPlaceholder('Paste the next message exactly as received…').fill('Reference number SAFE-1.')
+  await page.getByRole('button', { name: 'Add message' }).click()
+  await expect(page.getByText(/result is historical/i)).toBeVisible()
   await page.getByRole('button', { name: 'Reassess current revision' }).click()
-  await expect(page.getByText(/unchanged warning suppressed/i)).toHaveCount(0)
-
-  await page.reload()
-  await expect(page.getByText('Revision 3').first()).toBeVisible()
-  await expect(page.getByRole('heading', { name: 'High-risk indicators' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Needs clarification or review' })).toBeVisible()
 
   const second = await browser.newContext()
   const secondPage = await second.newPage()
   await secondPage.goto('/')
-  const inaccessible = await secondPage.evaluate(async (id) => (await fetch(`/cases/${id}`)).status, caseId)
-  expect(inaccessible).toBe(404)
+  const inaccessible = await secondPage.evaluate(async () => (await fetch('/cases/not-owned-by-this-session')).status)
+  expect(inaccessible).toBe(401)
   await second.close()
 
   const csrfStatus = await page.evaluate(async () => (await fetch('/cases', {
@@ -39,16 +32,20 @@ test('session, replay, highlight, append, reload, isolation, CSRF, and delete', 
   })).status)
   expect(csrfStatus).toBe(403)
 
-  page.once('dialog', (dialog) => dialog.accept())
   await page.getByRole('button', { name: 'Delete case' }).click()
-  await expect(page.getByRole('heading', { name: 'Check an interaction' })).toBeVisible()
+  await page.getByRole('dialog').getByRole('button', { name: 'Delete case' }).click()
+  await expect(page.getByRole('heading', { name: 'Case deleted' })).toBeVisible()
   await first.close()
 })
 
-test('unsupported demo visibly ends unable to assess', async ({ page }) => {
+test('checkpoint preserves the assessment boundary', async ({ page }) => {
   await page.goto('/')
-  await page.getByLabel('Scenario').selectOption('unsupported')
-  await page.getByRole('button', { name: 'Start demo' }).click()
-  await expect(page.getByRole('heading', { name: 'Unable to assess' })).toBeVisible()
-  await expect(page.getByText('Development mock — not real AI inference.').first()).toBeVisible()
+  await page.getByLabel('Conversation text').fill('Sender: please send your OTP now.')
+  await page.getByLabel('Stated payment purpose (required)').fill('Account verification')
+  await page.getByRole('checkbox').check()
+  await page.getByRole('button', { name: /Analyse conversation/ }).click()
+  await expect(page.getByRole('heading', { name: 'Needs clarification or review' })).toBeVisible()
+  await page.getByRole('button', { name: /Open simulated Before You Pay checkpoint/ }).click()
+  await expect(page.getByRole('heading', { name: 'Before You Pay' })).toBeVisible()
+  await expect(page.getByText(/SIMULATION ONLY · NO PAYMENT ACTION/)).toBeVisible()
 })

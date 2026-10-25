@@ -168,3 +168,128 @@ class AssessmentResponse(BaseModel):
     created_at: datetime
     is_current: bool
     idempotent_replay: bool
+
+
+class CreateReviewRequestRequest(BaseModel):
+    """Request review of one exact, current, persisted assessment revision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    assessment_id: str = Field(min_length=1, max_length=64)
+    expected_revision: Annotated[StrictInt, Field(ge=1)]
+
+
+class ReviewRequestStatusResponse(BaseModel):
+    """Owner-safe lifecycle status; excludes reviewer queue data and notes."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    review_request_id: str
+    case_id: str
+    assessment_id: str
+    assessed_revision: int
+    status: Literal["open", "resolved"]
+    submitted_at: datetime
+    resolved_at: datetime | None
+    outcome: Literal["follow_up", "escalated", "no_action", "inconclusive"] | None
+
+
+class CreateReviewRequestResponse(ReviewRequestStatusResponse):
+    """Create response reports retry replay or deduplication against an open request."""
+
+    idempotent_replay: bool
+    existing_open_request: bool
+
+
+class ReviewerQueueItemResponse(BaseModel):
+    """Minimal open-queue metadata; raw case content is available only on detail."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    review_request_id: str
+    case_id: str
+    assessment_id: str
+    assessed_revision: int
+    assessment_state: AssessmentState
+    is_current: bool
+    submitted_at: datetime
+
+
+class ReviewerQueueResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    items: list[ReviewerQueueItemResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+class ReviewerEvidenceResponse(BaseModel):
+    """Persisted exact quote plus only its source message, for reviewer context."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    tactic: str
+    event_id: str
+    source_order: int
+    quote: str
+    start_offset: int
+    end_offset: int
+    context: str
+    channel: str
+    source_text: str
+
+
+class ReviewerAssessmentSnapshotResponse(BaseModel):
+    """Assessment fields read from persistence; no verdict or evidence is synthesized."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    assessment_id: str
+    case_id: str
+    assessed_revision: int
+    state: AssessmentState
+    reason_codes: list[str]
+    explanation: str
+    evidence: list[ReviewerEvidenceResponse]
+    alert: AlertResponse
+    tactics_used: list[str]
+    relationships: list[str]
+    suggested_next_action: str
+    limitations: list[str]
+    extraction_mode: str
+    extraction_version: str
+    rule_version: str
+    schema_version: str
+    created_at: datetime
+    is_current: bool
+    payment_context: PaymentContext
+
+
+class ReviewerReviewRequestDetailResponse(ReviewRequestStatusResponse):
+    """Reviewer-only detail with persisted assessment snapshot and private note."""
+
+    reviewer_note: str | None
+    assessment: ReviewerAssessmentSnapshotResponse
+
+
+class ResolveReviewRequestRequest(BaseModel):
+    """Reviewer resolution with a bounded workflow outcome and optional short note."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    outcome: Literal["follow_up", "escalated", "no_action", "inconclusive"]
+    reviewer_note: str | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def normalize_blank_note(self) -> "ResolveReviewRequestRequest":
+        if self.reviewer_note is not None and not self.reviewer_note.strip():
+            self.reviewer_note = None
+        return self
+
+
+class ResolveReviewRequestResponse(ReviewRequestStatusResponse):
+    """Reviewer-only result of resolving a request."""
+
+    reviewer_note: str | None
+    idempotent_replay: bool

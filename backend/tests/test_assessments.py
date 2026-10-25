@@ -38,6 +38,7 @@ def create_case(
     *,
     key: str = "create-1",
     text: str = ("I am a police officer. You will be arrested. Stay on the call."),
+    purpose: str = "Verification",
 ):
     return client.post(
         "/cases",
@@ -45,7 +46,7 @@ def create_case(
         json={
             "consent": True,
             "payment_context": {
-                "stated_purpose": "Verification",
+                "stated_purpose": purpose,
                 "amount": "5000",
                 "recipient_reference": "recipient-1",
             },
@@ -346,3 +347,167 @@ def test_production_rejects_development_mock_extractor(tmp_path: Path) -> None:
             settings,
             extractor=DevelopmentMockExtractor(),
         )
+
+
+def test_latest_assessment_deterministic_ordering_same_second_across_revisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Assessments across revisions in the same second must return the latest revision."""
+    fixed_time = 1_800_000_000
+    app = create_app(make_settings(tmp_path), clock=lambda: fixed_time)
+
+    # Force UUIDs so that earlier revision gets higher lexical value
+    # rev 1 -> zzzz..., rev 2 -> aaaa...
+    # Under old created_at DESC, id DESC, rev 1 would incorrectly win!
+    generated_ids = [
+        "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ]
+    id_iter = iter(generated_ids)
+    monkeypatch.setattr(
+        "backend.scamflow.assessment_services._new_public_id",
+        lambda: next(id_iter),
+    )
+
+    with TestClient(app) as client:
+        bootstrap(client)
+        case_id = create_case(client).json()["case_id"]
+
+        # 1. Assess revision 1 (gets id zzzz...)
+        first = assess(client, case_id, key="assess-rev1", expected_revision=1)
+        assert first.status_code == 200
+        assert first.json()["assessment_id"] == "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+        assert first.json()["assessed_revision"] == 1
+
+        # 2. Append event -> advances case to revision 2
+        appended = append_event(client, case_id)
+        assert appended.status_code == 200
+        assert appended.json()["result_revision"] == 2
+
+        # 3. Assess revision 2 (gets id aaaa...) in same second
+        second = assess(client, case_id, key="assess-rev2", expected_revision=2)
+        assert second.status_code == 200
+        assert second.json()["assessment_id"] == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        assert second.json()["assessed_revision"] == 2
+
+        # 4. Query latest assessment
+        latest = client.get(f"/cases/{case_id}/assessments/latest", headers=HEADERS)
+        assert latest.status_code == 200
+        data = latest.json()
+        assert data["assessed_revision"] == 2
+        assert data["assessment_id"] == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        assert data["is_current"] is True
+
+
+def test_latest_assessment_deterministic_ordering_same_second_same_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Assessments for the same revision in the same second must return the newest attempt."""
+    fixed_time = 1_800_000_000
+    app = create_app(make_settings(tmp_path), clock=lambda: fixed_time)
+
+    # Force UUIDs so first attempt gets zzzz..., second attempt gets aaaa...
+    # Under old created_at DESC, id DESC, first attempt would win!
+    generated_ids = [
+        "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ]
+    id_iter = iter(generated_ids)
+    monkeypatch.setattr(
+        "backend.scamflow.assessment_services._new_public_id",
+        lambda: next(id_iter),
+    )
+
+    with TestClient(app) as client:
+        bootstrap(client)
+        case_id = create_case(client).json()["case_id"]
+
+        # 1. First assess revision 1 (gets zzzz...)
+        first = assess(client, case_id, key="assess-attempt-1", expected_revision=1)
+        assert first.status_code == 200
+        assert first.json()["assessment_id"] == "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+
+        # 2. Second assess revision 1 with new key (reassessment attempt, gets aaaa...)
+        second = assess(client, case_id, key="assess-attempt-2", expected_revision=1)
+        assert second.status_code == 200
+        assert second.json()["assessment_id"] == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+        # 3. Query latest assessment
+        latest = client.get(f"/cases/{case_id}/assessments/latest", headers=HEADERS)
+        assert latest.status_code == 200
+        data = latest.json()
+        assert data["assessed_revision"] == 1
+        assert data["assessment_id"] == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        assert data["is_current"] is True
+
+
+
+def test_fake_refund_assessment_persists_exact_unicode_evidence_and_alert(
+    tmp_path: Path,
+) -> None:
+    app = create_app(make_settings(tmp_path))
+    text = (
+        "İ 📩 Customer support: your refund has been approved. "
+        "Pay a processing fee to receive it."
+    )
+
+    with TestClient(app) as client:
+        bootstrap(client)
+        case_id = create_case(
+            client,
+            text=text,
+            purpose="Refund processing",
+        ).json()["case_id"]
+
+        response = assess(client, case_id, key="fake-refund-assessment")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["state"] == "high_risk_indicators"
+        assert body["reason_codes"] == ["refund_linked_to_payment_credentials_or_mismatch"]
+        assert body["alert"]["visible"] is True
+        assert "support_identity_claim" in body["tactics_used"]
+        assert "claimed_refund" in body["tactics_used"]
+        assert "advance_payment_request" in body["tactics_used"]
+        assert body["evidence"]
+        assert all(item["event_id"] == "evt-1" for item in body["evidence"])
+        assert all(item["source_order"] == 1 for item in body["evidence"])
+        assert all(
+            text[item["start_offset"] : item["end_offset"]] == item["quote"]
+            for item in body["evidence"]
+        )
+        support = next(
+            item for item in body["evidence"] if item["tactic"] == "support_identity_claim"
+        )
+        assert support["quote"] == "Customer support"
+        assert support["start_offset"] == text.index("Customer support")
+
+
+def test_refund_purpose_outgoing_payment_mismatch_persists_review_evidence(
+    tmp_path: Path,
+) -> None:
+    app = create_app(make_settings(tmp_path))
+    text = "Transfer money to account 123 to complete the requested resolution."
+
+    with TestClient(app) as client:
+        bootstrap(client)
+        case_id = create_case(
+            client,
+            text=text,
+            purpose="Refund resolution",
+        ).json()["case_id"]
+
+        response = assess(client, case_id, key="refund-purpose-mismatch")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["state"] == "needs_clarification_or_review"
+        assert body["reason_codes"] == ["refund_purpose_outgoing_payment_mismatch"]
+        assert "not proof of fraud" in body["explanation"]
+        evidence = next(
+            item for item in body["evidence"] if item["tactic"] == "outgoing_payment_request"
+        )
+        assert evidence["event_id"] == "evt-1"
+        assert evidence["source_order"] == 1
+        assert evidence["quote"] == "Transfer money"
+        assert text[evidence["start_offset"] : evidence["end_offset"]] == evidence["quote"]

@@ -1,249 +1,110 @@
-import { FormEvent, useEffect, useRef, useState } from 'react'
-import { ApiError, api, newKey } from './api'
-import { demos } from './demos'
-import type { Assessment, AssessmentEvidence, CaseRecord, Channel, EventInput } from './types'
-import { splitEvidence } from './unicode'
-import './styles.css'
+import { useEffect, useRef, useState } from 'react';
+import { Activity, AlertCircle, ArrowLeft, ArrowRight, Check, ChevronRight, CircleHelp, ClipboardCheck, Clock3, LockKeyhole, MessageSquareText, Plus, RefreshCw, Shield, ShieldCheck, Trash2, TriangleAlert, X } from 'lucide-react';
+import { api, ApiError, type Assessment, type AssessmentState, type CaseRecord, type Channel, type Evidence, type ReviewRequestStatus } from './api';
+import ReviewerDashboard from './ReviewerDashboard';
 
-const MOCK_NOTICE = 'Development mock — not real AI inference.'
-const stateLabels: Record<Assessment['state'], string> = {
-  high_risk_indicators: 'High-risk indicators',
-  needs_clarification_or_review: 'Needs clarification or review',
-  no_strong_indicators: 'No strong indicators detected',
-  unable_to_assess: 'Unable to assess',
+const channels: Channel[] = ['SMS', 'WhatsApp', 'Call transcript', 'Email', 'Other text'];
+const stateLabels: Record<AssessmentState, string> = { high_risk: 'High-risk indicators detected', review: 'Needs clarification or review', no_strong_indicators: 'No strong indicators found', unable_to_assess: 'Unable to assess' };
+function Logo() { return <a className="brand" href="#top" aria-label="ScamFlow AI home"><span className="brand-mark"><ShieldCheck size={20}/></span><span>scamflow<span className="brand-ai"> AI</span></span></a>; }
+function StateIcon({state}:{state:AssessmentState}) { return state==='high_risk'?<TriangleAlert/>:state==='review'?<CircleHelp/>:state==='no_strong_indicators'?<Shield/>:<AlertCircle/>; }
+function Highlight({text, evidence}:{text:string;evidence:Evidence[]}) {
+  const chars=Array.from(text);
+  const spans=evidence.filter(ev=>Number.isInteger(ev.startOffset)&&Number.isInteger(ev.endOffset)&&ev.startOffset!>=0&&ev.endOffset!>ev.startOffset!&&ev.endOffset!<=chars.length&&chars.slice(ev.startOffset!,ev.endOffset!).join('')===ev.quote).sort((a,b)=>a.startOffset!-b.startOffset!);
+  const parts:React.ReactNode[]=[]; let cursor=0;
+  for(const [index,span] of spans.entries()){
+    if(span.startOffset!<cursor)continue;
+    if(span.startOffset!>cursor)parts.push(chars.slice(cursor,span.startOffset!).join(''));
+    parts.push(<mark className="evidence-mark" key={`evidence-${index}`}>{span.quote}</mark>);
+    cursor=span.endOffset!;
+  }
+  parts.push(chars.slice(cursor).join(''));
+  return <>{parts}</>;
 }
-
-function messageFrom(error: unknown) {
-  if (error instanceof ApiError) return `${error.message} (${error.code})`
-  return 'The request could not be completed. Check the local server and try again.'
-}
-
-export function EvidenceText({ text, evidence }: { text: string; evidence?: AssessmentEvidence }) {
-  if (!evidence) return <>{text}</>
-  const [before, match, after] = splitEvidence(text, evidence.start_offset, evidence.end_offset)
-  return <>{before}<mark data-testid="selected-highlight">{match}</mark>{after}</>
-}
-
-function Timeline({ record, selected }: { record: CaseRecord; selected?: AssessmentEvidence }) {
-  return (
-    <section className="card timeline-card" aria-labelledby="timeline-heading">
-      <div className="section-heading"><div><span className="eyebrow">Evidence</span><h2 id="timeline-heading">Conversation timeline</h2></div><span className="revision">Revision {record.revision}</span></div>
-      <ol className="timeline">
-        {record.events.map((event) => (
-          <li key={event.event_id} id={`event-${event.event_id}`} className={selected?.event_id === event.event_id ? 'event selected' : 'event'}>
-            <div className="event-meta"><span>{event.channel.replace('_', ' ')}</span><span>#{event.source_order}</span></div>
-            <p><EvidenceText text={event.text} evidence={selected?.event_id === event.event_id ? selected : undefined} /></p>
-          </li>
-        ))}
-      </ol>
-    </section>
-  )
-}
-
-function AssessmentPanel({ assessment, onSelect }: { assessment: Assessment; onSelect: (item: AssessmentEvidence) => void }) {
-  const historical = !assessment.is_current
-  return (
-    <section className={`card assessment ${assessment.state}`} aria-labelledby="assessment-heading">
-      <div className="section-heading"><div><span className="eyebrow">Assessment</span><h2 id="assessment-heading">{stateLabels[assessment.state]}</h2></div><span className="revision">Revision {assessment.assessed_revision}</span></div>
-      <p className="mock-notice">{MOCK_NOTICE}</p>
-      {historical && <p className="historical" role="status">Historical result — new evidence was added after this assessment.</p>}
-      {assessment.alert.visible && <p className="alert" role="alert">Alert: {assessment.alert.reason.replaceAll('_', ' ')}{assessment.alert.prior_warning_state ? `; prior warning preserved: ${stateLabels[assessment.alert.prior_warning_state]}` : ''}.</p>}
-      <p>{assessment.explanation}</p>
-      <div className="action-box"><strong>Before you act</strong><p>{assessment.suggested_next_action}</p></div>
-      <h3>Linked excerpts</h3>
-      {assessment.evidence.length === 0 ? <p className="muted">No validated excerpt was used.</p> : (
-        <ul className="quotes">
-          {assessment.evidence.map((item, index) => (
-            <li key={`${item.event_id}-${item.start_offset}-${index}`}>
-              <button type="button" onClick={() => onSelect(item)} aria-label={`Highlight quote ${item.quote}`}>
-                <q>{item.quote}</q><small>{item.tactic.replaceAll('_', ' ')} · {item.context}</small>
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-      <details><summary>Limitations</summary><ul>{assessment.limitations.map((item) => <li key={item}>{item}</li>)}</ul></details>
-    </section>
-  )
-}
-
 export default function App() {
-  const [ready, setReady] = useState(false)
-  const [record, setRecord] = useState<CaseRecord | null>(null)
-  const [assessment, setAssessment] = useState<Assessment | null>(null)
-  const [selectedEvidence, setSelectedEvidence] = useState<AssessmentEvidence>()
-  const [error, setError] = useState('')
-  const [busy, setBusy] = useState('')
-  const [consent, setConsent] = useState(false)
-  const [initialText, setInitialText] = useState('')
-  const [channel, setChannel] = useState<Channel>('whatsapp')
-  const [purpose, setPurpose] = useState('')
-  const [amount, setAmount] = useState('')
-  const [recipient, setRecipient] = useState('')
-  const [appendText, setAppendText] = useState('')
-  const [demoId, setDemoId] = useState(demos[0].id)
-  const [demoCaseId, setDemoCaseId] = useState<string | null>(null)
-  const [demoCount, setDemoCount] = useState(0)
-  const activeCase = useRef<string | null>(null)
-  const epoch = useRef(0)
-  const retryKeys = useRef(new Map<string, string>())
-
-  const selectCase = (caseId: string | null) => {
-    activeCase.current = caseId
-    epoch.current += 1
-    const url = new URL(window.location.href)
-    if (caseId) url.searchParams.set('case', caseId); else url.searchParams.delete('case')
-    window.history.replaceState({}, '', url)
-  }
-
-  const loadCase = async (caseId: string) => {
-    const requestEpoch = ++epoch.current
-    activeCase.current = caseId
-    const loaded = await api.getCase(caseId)
-    if (requestEpoch !== epoch.current || activeCase.current !== caseId) return null
-    setRecord(loaded)
-    try {
-      const latest = await api.latest(caseId)
-      if (requestEpoch === epoch.current && activeCase.current === caseId) setAssessment(latest)
-    } catch (loadError) {
-      if (loadError instanceof ApiError && loadError.code === 'assessment_not_found') setAssessment(null)
-      else throw loadError
-    }
-    return loaded
-  }
-
-  useEffect(() => {
-    let cancelled = false
-    void (async () => {
-      try {
-        await api.bootstrap()
-        if (cancelled) return
-        setReady(true)
-        const caseId = new URL(window.location.href).searchParams.get('case')
-        if (caseId) { selectCase(caseId); await loadCase(caseId) }
-      } catch (bootstrapError) { if (!cancelled) setError(messageFrom(bootstrapError)) }
-    })()
-    return () => { cancelled = true; epoch.current += 1 }
-  }, [])
-
-  const assessRecord = async (target: CaseRecord) => {
-    const scope = `assess:${target.case_id}:${target.revision}`
-    const key = retryKeys.current.get(scope) ?? newKey('assess')
-    retryKeys.current.set(scope, key)
-    const requestEpoch = epoch.current
-    const result = await api.assess(target.case_id, key, target.revision)
-    if (requestEpoch === epoch.current && activeCase.current === target.case_id) {
-      setAssessment(result); setSelectedEvidence(undefined)
-    }
-    retryKeys.current.delete(scope)
-    return result
-  }
-
-  const create = async (event: FormEvent) => {
-    event.preventDefault()
-    if (busy) return
-    setError('')
-    if (!consent) { setError('Consent is required before evidence can be stored.'); return }
-    const total = initialText.length + purpose.length + recipient.length
-    if (!initialText.trim() || !purpose.trim()) { setError('Add an interaction and its stated payment purpose.'); return }
-    if (total > 12000) { setError('Combined case content must not exceed 12,000 characters.'); return }
-    setBusy('create')
-    const scope = `create:${initialText}:${purpose}:${amount}:${recipient}`
-    const key = retryKeys.current.get(scope) ?? newKey('create')
-    retryKeys.current.set(scope, key)
-    try {
-      const created = await api.createCase(key, { stated_purpose: purpose, amount: amount || null, recipient_reference: recipient || null }, [{ event_id: crypto.randomUUID(), channel, text: initialText, source_order: 1 }])
-      retryKeys.current.delete(scope)
-      selectCase(created.case_id)
-      await loadCase(created.case_id)
-    } catch (createError) { setError(messageFrom(createError)) }
-    finally { setBusy('') }
-  }
-
-  const append = async (event: FormEvent) => {
-    event.preventDefault()
-    if (!record || busy || !appendText.trim()) return
-    setBusy('append'); setError('')
-    const payload: EventInput = { event_id: crypto.randomUUID(), channel, text: appendText, source_order: Math.max(...record.events.map((item) => item.source_order), 0) + 1 }
-    const scope = `append:${record.case_id}:${record.revision}:${appendText}`
-    const key = retryKeys.current.get(scope) ?? newKey('append')
-    retryKeys.current.set(scope, key)
-    try {
-      await api.append(record.case_id, key, record.revision, [payload])
-      retryKeys.current.delete(scope); setAppendText('')
-      await loadCase(record.case_id)
-    } catch (appendError) { setError(messageFrom(appendError)) }
-    finally { setBusy('') }
-  }
-
-  const runAssessment = async () => {
-    if (!record || busy) return
-    setBusy('assess'); setError('')
-    try { await assessRecord(record) } catch (assessError) { setError(messageFrom(assessError)) }
-    finally { setBusy('') }
-  }
-
-  const remove = async () => {
-    if (!record || busy || !window.confirm('Permanently delete this case and its derived assessments?')) return
-    setBusy('delete'); setError('')
-    try {
-      await api.deleteCase(record.case_id)
-      if (demoCaseId === record.case_id) { setDemoCaseId(null); setDemoCount(0) }
-      selectCase(null); setRecord(null); setAssessment(null); setSelectedEvidence(undefined)
-    } catch (deleteError) { setError(messageFrom(deleteError)) }
-    finally { setBusy('') }
-  }
-
-  const revealDemo = async () => {
-    if (busy) return
-    const scenario = demos.find((item) => item.id === demoId) ?? demos[0]
-    if (demoCaseId && record?.case_id !== demoCaseId) { setError('Reset the current demo before starting another demo case.'); return }
-    if (demoCount >= scenario.events.length) return
-    setBusy('demo'); setError('')
-    try {
-      let target: CaseRecord
-      if (!demoCaseId) {
-        const first = scenario.events[0]
-        const created = await api.createCase(newKey('demo-create'), scenario.payment, [first])
-        setDemoCaseId(created.case_id); setDemoCount(1); selectCase(created.case_id)
-        target = (await loadCase(created.case_id)) as CaseRecord
-      } else {
-        if (!record) throw new Error('Demo case is unavailable')
-        const next = scenario.events[demoCount]
-        await api.append(record.case_id, newKey('demo-append'), record.revision, [next])
-        setDemoCount((value) => value + 1)
-        target = (await loadCase(record.case_id)) as CaseRecord
-      }
-      if (target) await assessRecord(target)
-    } catch (demoError) { setError(messageFrom(demoError)) }
-    finally { setBusy('') }
-  }
-
-  const resetDemo = async () => {
-    if (!demoCaseId || busy) return
-    setBusy('demo-reset'); setError('')
-    try {
-      await api.deleteCase(demoCaseId)
-      if (record?.case_id === demoCaseId) { selectCase(null); setRecord(null); setAssessment(null) }
-      setDemoCaseId(null); setDemoCount(0)
-    } catch (resetError) { setError(messageFrom(resetError)) }
-    finally { setBusy('') }
-  }
-
-  return (
-    <div className="app-shell">
-      <aside className="sidebar"><a className="brand" href="/" aria-label="ScamFlow AI home"><span>SF</span> ScamFlow AI</a><nav aria-label="Main navigation"><a href="#intake">New check</a><a href="#timeline-heading">Evidence</a><a href="#demo">Synthetic demos</a></nav><p className="privacy">Evidence stays in your configured local database. Session secrets remain in protected cookies.</p></aside>
-      <main>
-        <header className="topbar"><div><span className="eyebrow">Before-you-pay safety copilot</span><h1>Pause. Check the pattern. Keep control.</h1></div><span className={ready ? 'status ready' : 'status'}>{ready ? 'Local session ready' : 'Connecting…'}</span></header>
-        <p className="mock-banner">{MOCK_NOTICE}</p>
-        {error && <div className="error" role="alert">{error}</div>}
-        <section id="demo" className="card demo-card" aria-labelledby="demo-heading"><div><span className="eyebrow">Guided test</span><h2 id="demo-heading">Incremental synthetic replay</h2><p>Each click reveals and submits exactly one event through the normal case APIs.</p></div><label>Scenario<select value={demoId} disabled={Boolean(demoCaseId)} onChange={(e) => setDemoId(e.target.value)}>{demos.map((item) => <option value={item.id} key={item.id}>{item.title}</option>)}</select></label><div className="button-row"><button type="button" onClick={revealDemo} disabled={Boolean(busy) || demoCount >= (demos.find((item) => item.id === demoId)?.events.length ?? 0)}>{busy === 'demo' ? 'Replaying…' : demoCaseId ? 'Reveal next & reassess' : 'Start demo'}</button><button className="secondary" type="button" onClick={resetDemo} disabled={!demoCaseId || Boolean(busy)}>Reset this demo</button></div></section>
-        {!record ? (
-          <form id="intake" className="card form-card" onSubmit={create} noValidate><span className="eyebrow">New case</span><h2>Check an interaction</h2><label>Message or transcript<textarea maxLength={12000} required value={initialText} onChange={(e) => setInitialText(e.target.value)} placeholder="Paste the exact text. Whitespace and emoji are preserved." /></label><div className="form-grid"><label>Channel<select value={channel} onChange={(e) => setChannel(e.target.value as Channel)}><option value="whatsapp">WhatsApp</option><option value="sms">SMS</option><option value="call_transcript">Call transcript</option><option value="email">Email</option><option value="other_text">Other text</option></select></label><label>Stated payment purpose<input required maxLength={12000} value={purpose} onChange={(e) => setPurpose(e.target.value)} /></label><label>Amount (optional)<input inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="5000.00" /></label><label>Recipient reference (optional)<input maxLength={256} value={recipient} onChange={(e) => setRecipient(e.target.value)} /></label></div><label className="consent"><input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} /> I consent to storing this evidence locally for assessment.</label><button disabled={Boolean(busy)}>{busy === 'create' ? 'Creating…' : 'Create case'}</button></form>
-        ) : (
-          <div className="workspace"><div><Timeline record={record} selected={selectedEvidence} /><form className="card append" onSubmit={append}><h2>Add clarification or new evidence</h2><p className="muted">New text is appended as revisioned evidence; originals are never rewritten.</p><textarea required maxLength={12000} value={appendText} onChange={(e) => setAppendText(e.target.value)} placeholder="Add the exact next message or clarification" /><div className="button-row"><button disabled={Boolean(busy) || !appendText.trim()}>{busy === 'append' ? 'Appending…' : 'Append evidence'}</button><button type="button" className="secondary" onClick={runAssessment} disabled={Boolean(busy)}>{busy === 'assess' ? 'Assessing…' : assessment ? 'Reassess current revision' : 'Assess case'}</button><button type="button" className="danger" onClick={remove} disabled={Boolean(busy)}>Delete case</button></div></form></div><div>{assessment ? <AssessmentPanel assessment={assessment} onSelect={(item) => { setSelectedEvidence(item); document.getElementById(`event-${item.event_id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }) }} /> : <section className="card empty"><h2>No assessment yet</h2><p>Assess the current revision to see evidence-linked findings.</p><button onClick={runAssessment} disabled={Boolean(busy)}>Assess case</button></section>}</div></div>
-        )}
-      </main>
-    </div>
-  )
+  const [channel,setChannel]=useState<Channel>('SMS'); const [conversation,setConversation]=useState(''); const [consent,setConsent]=useState(false);
+  const [amount,setAmount]=useState(''); const [requestedAction,setRequestedAction]=useState(''); const [recipient,setRecipient]=useState('');
+  const [caseData,setCaseData]=useState<CaseRecord|null>(null); const [busy,setBusy]=useState(false); const [error,setError]=useState(''); const [notice,setNotice]=useState(''); const [draft,setDraft]=useState(''); const [showDelete,setShowDelete]=useState(false); const [showHistory,setShowHistory]=useState(false); const [deleted,setDeleted]=useState(false); const [showPaymentCheckpoint,setShowPaymentCheckpoint]=useState(false);
+  const [appRoute,setAppRoute]=useState<'workspace'|'reviewer'>(()=>window.location.pathname==='/reviewer'?'reviewer':'workspace'); const [ownerReview,setOwnerReview]=useState<ReviewRequestStatus|null>(null); const [reviewBusy,setReviewBusy]=useState(false); const [reviewError,setReviewError]=useState(''); const [reviewNotice,setReviewNotice]=useState('');
+  const messageRefs=useRef<Record<string,HTMLElement|null>>({}); const caseLoadGeneration=useRef(0); const [activeEvidence,setActiveEvidence]=useState<string|null>(null);
+  const requestedCaseId=new URLSearchParams(window.location.search).get('case');
+  const isBusy=busy; const current=caseData?.current;
+  useEffect(()=>{const onPopState=()=>setAppRoute(window.location.pathname==='/reviewer'?'reviewer':'workspace');window.addEventListener('popstate',onPopState);return()=>window.removeEventListener('popstate',onPopState);},[]);
+  useEffect(()=>{setOwnerReview(null);setReviewError('');setReviewNotice('');},[caseData?.id]);
+  function openReviewerDashboard(){window.history.pushState({},'','/reviewer');setAppRoute('reviewer');}
+  function returnToWorkspace(){window.history.pushState({},'',caseData?`/?case=${encodeURIComponent(caseData.id)}`:'/');setAppRoute('workspace');}
+  function reviewFailureMessage(reason:unknown){if(!(reason instanceof ApiError))return 'The review request could not be completed. Its status is not confirmed.';if(reason.status===401)return 'Your owner session has expired. Reload the case and begin a new session before requesting review.';if(reason.status===404)return 'The case, assessment, or review request is no longer available; it may have expired or been deleted.';if(reason.status===409)return `The backend rejected this stale or ineligible request: ${reason.message}`;if(reason.status===503)return 'The review workflow is currently unavailable on the backend. The request status is not confirmed.';if(reason.status===0)return 'The backend could not be reached. The request may have been received; retry the same request to reuse its idempotency key safely.';return reason.message;}
+  const reviewEligible=Boolean(caseData&&current&&current.isCurrent===true&&current.revision===caseData.revision&&(current.state==='review'||current.state==='unable_to_assess'));
+  async function requestHumanReview(){if(!caseData||!current||!reviewEligible)return;setReviewBusy(true);setReviewError('');setReviewNotice('');try{const created=await api.createReviewRequest(caseData.id,current.id,caseData.revision);setOwnerReview(created);setReviewNotice(created.existingOpenRequest?'An open request already exists for this case revision. Its persisted status is shown below.':created.idempotentReplay?'The backend confirmed the prior request. Its persisted status is shown below.':'The backend accepted a persisted review-workflow request. This does not guarantee reviewer availability or notification.');try{setOwnerReview(await api.getOwnerReviewRequest(caseData.id,created.reviewRequestId));}catch(statusError){setReviewError(`The create response was received, but the owner status could not be refreshed: ${reviewFailureMessage(statusError)}`);}}catch(reason){setReviewError(reviewFailureMessage(reason));}finally{setReviewBusy(false);}}
+  async function refreshOwnerReview(){if(!caseData||!ownerReview)return;setReviewBusy(true);setReviewError('');try{setOwnerReview(await api.getOwnerReviewRequest(caseData.id,ownerReview.reviewRequestId));setReviewNotice('Review request status refreshed from the backend.');}catch(reason){setReviewError(reviewFailureMessage(reason));}finally{setReviewBusy(false);}}
+  useEffect(()=>{
+    if(!requestedCaseId)return;
+    const generation=++caseLoadGeneration.current; setBusy(true); setError('');
+    void api.getCase(requestedCaseId).then(result=>{if(generation===caseLoadGeneration.current)setCaseData(result);}).catch(e=>{if(generation===caseLoadGeneration.current)setError((e as Error).message);}).finally(()=>{if(generation===caseLoadGeneration.current)setBusy(false);});
+    return ()=>{if(generation===caseLoadGeneration.current)caseLoadGeneration.current++;};
+  },[requestedCaseId]);
+  async function submit(e:React.FormEvent) { e.preventDefault(); setError(''); setNotice(''); if(!consent){setError('Please confirm consent before submitting your conversation.');return;} if(conversation.trim().length<8){setError('Add at least 8 characters so there is context to review.');return;} if(conversation.length>12000){setError('This conversation is over the 12,000 character limit.');return;} if(!requestedAction.trim()){setError('The connected backend requires a stated payment purpose. Add the requested action in payment context.');return;} setBusy(true); try { const result=await api.createCase({channel,conversation,amount:amount||undefined,requestedAction,recipient:recipient||undefined});setCaseData(result);setDeleted(false);setShowPaymentCheckpoint(false); } catch(e){setError((e as Error).message||'Unable to create this case.');} finally{setBusy(false);} }
+  async function refresh(){ if(!caseData)return;setBusy(true);setError('');try{setCaseData(await api.getCase(caseData.id));setNotice('Latest case revision loaded.');}catch(e){setError((e as Error).message);}finally{setBusy(false);} }
+  async function assess(){ if(!caseData)return;setBusy(true);setError('');setNotice('');try{const result=await api.assess(caseData.id,caseData.revision);const previous=caseData.current;setCaseData(result);if(result.current?.alert){if(!result.current.alert.visible)setNotice('No new material change.');else setNotice(`What changed: ${result.current.alert.reason}. Review the updated evidence below.`);}else if(previous&&previous.state===result.current?.state){setNotice('No new material change.');}else if(previous&&result.current){setNotice('What changed: the assessment state changed. Review the updated evidence below.');}else setNotice('Assessment updated.');}catch(e){setError((e as Error).message);if(e instanceof ApiError&&e.status===409){try{setCaseData(await api.getCase(caseData.id));setNotice('Revision conflict: latest evidence reloaded. Review it and retry your action.');}catch{/* keep original failure */}}}finally{setBusy(false);} }
+  async function append(e:React.FormEvent){e.preventDefault();if(!caseData||!draft.trim())return;setBusy(true);setError('');setNotice('');try{const updated=await api.appendMessage(caseData.id,draft,caseData.revision);setCaseData(updated);setDraft('');setNotice('Message added. Your previous assessment is now historical until reassessment.');}catch(e){setError((e as Error).message);if(e instanceof ApiError&&e.status===409){try{setCaseData(await api.getCase(caseData.id));setNotice('Revision conflict: latest case reloaded. Confirm the current conversation before retrying.');}catch{/* preserve error */}}}finally{setBusy(false);}}
+  async function deleteCase(){if(!caseData)return;setBusy(true);setError('');try{await api.deleteCase(caseData.id);window.history.replaceState({},'','/');setCaseData(null);setShowPaymentCheckpoint(false);setConversation('');setRequestedAction('');setAmount('');setRecipient('');setDraft('');setConsent(false);setShowDelete(false);setNotice('');setDeleted(true);}catch(e){setError((e as Error).message);setShowDelete(false);}finally{setBusy(false);}}
+  function showEvidence(ev:Assessment['evidence'][number]){setActiveEvidence(ev.messageId);const el=messageRefs.current[ev.messageId];el?.scrollIntoView({behavior:'smooth',block:'center'});}
+  const assessedRevision=current?.revision;
+  if(appRoute==='reviewer')return <ReviewerDashboard onReturn={returnToWorkspace}/>;
+  return <div id="top" className="app-shell">
+    <header className="topbar"><div className="topbar-inner"><Logo/><nav aria-label="Main navigation"><a href="#how-it-works">How it works</a><a href="#privacy">Privacy</a><a href="/reviewer" onClick={event=>{event.preventDefault();openReviewerDashboard();}}>Reviewer dashboard</a></nav><span className="secure-pill"><LockKeyhole size={14}/> You choose what to share</span></div></header>
+    <main>
+      {!caseData ? (deleted ? <section className="form-section wrap" aria-labelledby="deleted-title"><div className="submission-card"><div className="step-label"><span><Check size={14}/></span> CASE REMOVED</div><h1 id="deleted-title">Case deleted</h1><p role="status">The backend confirmed deletion. Case details have been cleared from this view.</p><button className="button button-primary" onClick={()=>setDeleted(false)}>Start another review <ArrowRight size={17}/></button></div></section> : <>
+        {requestedCaseId&&busy&&<div className="inline-notice" role="status">Loading saved case…</div>}
+        <section className="hero wrap"><div className="hero-copy"><div className="eyebrow"><span className="eyebrow-dot"/> A calmer second look</div><h1>Understand the warning signs <em>before you pay.</em></h1><p className="hero-intro">When a message asks for money, a code, or an urgent decision, take a moment to understand what it says.</p><div className="trust-line"><span><Check size={15}/> You choose what to share</span><span><Check size={15}/> Evidence linked to its source</span></div></div><div className="hero-illustration" aria-hidden="true"><div className="orbit orbit-one"/><div className="orbit orbit-two"/><div className="shield-art"><ShieldCheck size={57} strokeWidth={1.4}/></div><div className="float-note note-one"><span className="note-icon"><MessageSquareText size={16}/></span><span><b>Take a closer look</b><small>At your own pace</small></span></div><div className="float-note note-two"><span className="note-check"><Check size={15}/></span><span><b>Source-linked</b><small>Every excerpt</small></span></div></div></section>
+        <section className="form-section wrap" aria-labelledby="submit-title"><div className="form-intro"><div className="step-label"><span>01</span> START WITH THE MESSAGE</div><h2 id="submit-title">Share what happened</h2><p>Paste a conversation you voluntarily received. Your original wording is kept intact for review.</p></div>
+          <form className="submission-card" onSubmit={submit} noValidate><div className="form-grid"><label className="field"><span>Where was the conversation?</span><select value={channel} onChange={e=>setChannel(e.target.value as Channel)}>{channels.map(c=><option key={c}>{c}</option>)}</select></label><div className="field"><label htmlFor="conversation">Conversation text</label><textarea id="conversation" value={conversation} onChange={e=>setConversation(e.target.value)} maxLength={12000} placeholder={'Paste the messages as they appeared.\nYou can include sender labels, line breaks, and emoji.'} rows={8} aria-describedby="char-help"/><div id="char-help" className="field-foot"><span>Keep the original wording and line breaks</span><span>{conversation.length.toLocaleString()} / 12,000</span></div></div>
+            <label className="field"><span>Stated payment purpose (required)</span><input value={requestedAction} onChange={e=>setRequestedAction(e.target.value)} placeholder="e.g. transfer for verification" required/></label>
+            <details className="payment-details"><summary>Optional: add amount or recipient context <ChevronRight size={16}/></summary><div className="optional-grid"><label className="field"><span>Amount</span><input inputMode="decimal" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="e.g. 250"/></label><label className="field"><span>Recipient description</span><input value={recipient} onChange={e=>setRecipient(e.target.value)} placeholder="e.g. someone claiming to be my bank"/></label></div></details>
+            <div id="privacy-consent" className="historical-note"><LockKeyhole size={15}/><span><b>Privacy and consent.</b> Submitting sends the conversation, channel, stated purpose, and optional payment context to the connected ScamFlow backend. It may contain personal information. Share only what you choose and have permission to share; do not enter passwords, PINs, or one-time codes.</span></div>
+            <label className="consent-row"><input type="checkbox" checked={consent} onChange={e=>setConsent(e.target.checked)} aria-describedby="privacy-consent"/><span>I voluntarily consent to send this information for case analysis.</span></label>
+            {error&&<div className="inline-error" role="alert"><AlertCircle size={17}/>{error}</div>}{notice&&<div className="inline-notice" role="status"><Check size={16}/>{notice}</div>}
+            <button className="button button-primary submit-button" type="submit" disabled={isBusy}>{isBusy?<><span className="spinner"/> Analysing…</>:<>Analyse conversation <ArrowRight size={17}/></>}</button><p className="form-disclaimer">Sender identity is not verified. This tool is not a safety guarantee.</p>
+          </div></form>
+        </section>
+        <section className="how-section wrap" id="how-it-works"><div className="section-heading"><div className="step-label"><span>02</span> WHAT TO EXPECT</div><h2>A thoughtful review, not a verdict.</h2></div><div className="how-grid"><article><span className="how-icon"><ClipboardCheck/></span><h3>Keep the context</h3><p>Your conversation stays in its original order, with wording and line breaks preserved.</p></article><article><span className="how-icon"><Activity/></span><h3>See what stands out</h3><p>Any quoted evidence points back to the exact message it came from.</p></article><article><span className="how-icon"><Shield/></span><h3>Choose your next step</h3><p>Use the assessment as a prompt to pause, clarify, and verify independently.</p></article></div></section>
+      </>) : showPaymentCheckpoint ? <section className="checkpoint-page wrap" aria-labelledby="checkpoint-title">
+        <button className="back-link checkpoint-back" type="button" onClick={()=>{setShowPaymentCheckpoint(false);setNotice('Returned to the case workspace. No payment action was taken.')}}><ArrowLeft size={15}/> Return to case workspace</button>
+        <header className="checkpoint-header"><div className="checkpoint-kicker"><ShieldCheck size={16}/> SIMULATION ONLY · NO PAYMENT ACTION</div><h1 id="checkpoint-title">Before You Pay</h1><p>A pause point based only on the assessment already returned for this case revision.</p><div className="checkpoint-boundary" role="note"><LockKeyhole size={18}/><span><b>This is only a UI simulation.</b> It does not connect to UPI, a bank, a wallet, payment links, recipient verification, OTP/PIN entry, or money movement. No payment service is contacted.</span></div></header>
+        <section className={`checkpoint-state state-${current?.state??'unavailable'}`} aria-labelledby="checkpoint-state-title"><div className="checkpoint-state-icon">{current?<StateIcon state={current.state}/>:<AlertCircle/>}</div><div><div className="panel-overline">BACKEND ASSESSMENT · CASE REVISION {caseData.revision}</div><h2 id="checkpoint-state-title">{current?stateLabels[current.state]:'No assessment available'}</h2><p>{current?`Assessment revision ${current.revision}${current.revision<caseData.revision?' · Historical for this case revision':''}`:'No backend assessment state is available for this loaded case.'}</p></div></section>
+        {current&&(current.state==='high_risk'||current.state==='review')&&<div className="checkpoint-guidance checkpoint-pause" role="note"><TriangleAlert size={20}/><div><b>Pause before taking any payment action.</b><p>Independently verify through an official channel you find yourself. Do not rely on contact details or payment instructions in the conversation. This simulation cannot stop or handle a real transaction.</p></div></div>}
+        {current&&(current.state==='no_strong_indicators'||current.state==='unable_to_assess')&&<div className="checkpoint-guidance checkpoint-caution" role="note"><Shield size={20}/><div><b>This is not a safety guarantee or payment clearance.</b><p>{current.state==='unable_to_assess'?'The backend could not produce an assessment.':'The backend found no strong indicators in the supported input.'} The recipient and payment details have not been verified; continue cautiously and use official channels independently.</p></div></div>}
+        {!current&&<div className="checkpoint-guidance checkpoint-caution" role="status"><AlertCircle size={20}/><div><b>Assessment unavailable.</b><p>{caseData.assessmentFailure??'No backend assessment was returned for this case revision.'} This simulation cannot evaluate or verify a payment. Do not treat the missing result as reassurance.</p></div></div>}
+        <div className="checkpoint-grid"><section className="checkpoint-panel" aria-labelledby="checkpoint-details-title"><h2 id="checkpoint-details-title">Assessment details</h2><div className="checkpoint-detail"><h3>Backend explanation</h3><p>{current?.reasons.length?current.reasons[current.reasons.length-1]:'No backend explanation is available.'}</p></div>{current&&current.reasons.length>1&&<div className="checkpoint-detail"><h3>Backend reason codes</h3><ul>{current.reasons.slice(0,-1).map((reason,i)=><li key={i}>{reason}</li>)}</ul></div>}<div className="checkpoint-detail"><h3>Backend alert status</h3>{current?.alert?<p><b>{current.alert.visible?'Visible':'Not visible'}</b>{current.alert.reason?` · ${current.alert.reason}`:''}</p>:<p>No backend alert status is available in the loaded assessment.</p>}</div><div className="checkpoint-detail checkpoint-next"><h3>Safe next action from the backend</h3><p>{current?.nextAction??'No backend next action is available.'}</p></div><div className="checkpoint-detail"><h3>Backend limitations</h3>{current?.limitations.length?current.limitations.map((item,i)=><p key={i}>{item}</p>):<p>No backend limitations are available.</p>}<p className="checkpoint-guarantee">No assessment result is a safety guarantee.</p></div></section>
+        <section className="checkpoint-panel" aria-labelledby="checkpoint-evidence-title"><h2 id="checkpoint-evidence-title">Exact evidence from the assessment</h2>{current?.evidence.length?<div className="checkpoint-evidence-list">{current.evidence.map((ev,i)=>{const source=caseData.messages.find(message=>message.id===ev.messageId);return <article className="checkpoint-evidence-item" key={`${ev.messageId}-${i}`}><blockquote>{ev.quote}</blockquote><p className="checkpoint-evidence-reason">{ev.reason}</p>{source?<><small>Source message {source.order} · {source.channel}</small><p className="checkpoint-source"><Highlight text={source.text} evidence={[ev]}/></p></>:<small>Source message is not present in the loaded case.</small>}</article>})}</div>:<p className="muted-copy">No backend evidence excerpts were returned for this assessment.</p>}</section></div>
+        <div className="checkpoint-actions"><button className="button button-quiet" type="button" onClick={()=>{setShowPaymentCheckpoint(false);setNotice('Returned to the case workspace. No payment action was taken.')}}>Return to case workspace</button><button className="button button-soft" type="button" onClick={()=>{setShowPaymentCheckpoint(false);setNotice('Simulation abandoned. No payment was started or attempted.')}}>Abandon simulation</button></div><p className="checkpoint-footnote">Simulation only. No real payment was started, changed, or interacted with.</p>
+      </section> : <section className="workspace wrap"><div className="workspace-heading"><div><button className="back-link" onClick={()=>{caseLoadGeneration.current++;window.history.replaceState({},'','/');setCaseData(null);setShowPaymentCheckpoint(false);setNotice('')}}><ArrowLeft size={15}/> Start a new review</button><div className="case-title-line"><span className="case-kicker">CASE WORKSPACE</span><span className="revision-chip">Revision {caseData.revision}</span></div><h1>Your conversation, in context.</h1><p>Review the original messages alongside the evidence-based assessment.</p></div><div className="case-actions"><button className="button button-quiet" onClick={()=>setShowHistory(v=>!v)} aria-expanded={showHistory}><Clock3 size={16}/> History</button><button className="icon-button danger-icon" onClick={()=>setShowDelete(true)} aria-label="Delete case"><Trash2 size={17}/></button></div></div>
+        {showHistory&&<div className="history-panel"><div className="history-top"><h3>Assessment history (this session)</h3><button className="icon-button" onClick={()=>setShowHistory(false)} aria-label="Close history"><X size={16}/></button></div><p className="muted-copy">Only results observed in this browser session are listed. The backend provides the latest assessment, not a historical list.</p>{caseData.history.map(a=>{const isCurrent=a.id===current?.id&&a.revision===caseData.revision;return <div className="history-row" key={a.id}><span className={isCurrent?'history-dot is-current':'history-dot'}/><span><b>{stateLabels[a.state]}</b><small>Revision {a.revision} · {isCurrent?'Current':'Historical'}</small></span></div>})}</div>}
+        {caseData.assessmentFailure&&<div className="inline-error workspace-error" role="alert"><AlertCircle size={17}/><span>Unable to assess this case: {caseData.assessmentFailure}. The original case remains available; you can retry.</span></div>}{error&&<div className="inline-error workspace-error" role="alert"><AlertCircle size={17}/><span>{error}</span><button className="button button-quiet" onClick={refresh} disabled={busy}><RefreshCw size={14}/> Reload latest</button></div>}{notice&&<div className="inline-notice workspace-notice" role="status"><Check size={16}/>{notice}</div>}
+        <div className="workspace-grid"><section className="conversation-panel" aria-labelledby="conversation-title"><div className="panel-heading"><div><div className="panel-overline">ORIGINAL SOURCE</div><h2 id="conversation-title">Conversation</h2></div><span className="channel-chip"><MessageSquareText size={14}/>{caseData.channel}</span></div><p className="panel-description">Preserved as submitted. Select a highlighted excerpt to jump to its original message.</p>
+          <div className="timeline">{caseData.messages.map(m=>{const quotes=current?.evidence.filter(ev=>ev.messageId===m.id)??[];return <article key={m.id} ref={el=>{messageRefs.current[m.id]=el}} className={`message-card ${activeEvidence===m.id?'message-active':''}`}><div className="message-meta"><span className="sender-avatar">{m.sender.slice(0,1).toUpperCase()}</span><b>{m.sender}</b><span className="message-order">Message {m.order}</span>{quotes.length>0&&<span className="evidence-badge"><span/> Evidence</span>}</div><p className="message-text"><Highlight text={m.text} evidence={quotes}/></p></article>})}</div>
+          <p className="muted-copy replay-unavailable">Prefix replay is unavailable: the backend assesses persisted case revisions only.</p>
+          <form className="append-form" onSubmit={append}><div className="append-heading"><span className="add-icon"><Plus size={16}/></span><span><b>Add a message</b><small>Append to revision {caseData.revision}; the current assessment becomes historical.</small></span></div><label className="sr-only" htmlFor="append-message">New message text</label><textarea id="append-message" rows={3} value={draft} onChange={e=>setDraft(e.target.value)} maxLength={5000} placeholder="Paste the next message exactly as received…"/><button className="button button-soft" type="submit" disabled={busy||!draft.trim()}><Plus size={15}/> Add message</button></form>
+        </section>
+        <aside className="assessment-column"><section className={`assessment-card ${current?`state-${current.state}`:'state-unavailable'}`}><div className="assessment-label"><span className="status-icon">{current?<StateIcon state={current.state}/>:<AlertCircle/>}</span><span>BACKEND ASSESSMENT</span><span className="assessment-revision">Revision {assessedRevision??'—'}</span></div><h2>{current?stateLabels[current.state]:'No assessment available'}</h2><p className="assessment-subtitle">{current?.state==='no_strong_indicators'?'No strong indicators found does not establish that this is safe.':current?.state==='unable_to_assess'?'The backend could not assess this conversation.':current?'Backend result for this revision; it is not a guarantee.':'No backend assessment was returned for this case revision.'}</p>
+            {current?.alert&&<div className="historical-note" role="status"><CircleHelp size={15}/><span><b>Backend alert status: {current.alert.visible?'visible':'not visible'}.</b> {current.alert.reason&&<>Reason: {current.alert.reason}</>}</span></div>}
+            {current&&current.revision<caseData.revision&&<div className="historical-note"><Clock3 size={15}/><span>This result is <b>historical</b> (revision {current.revision}). Newer conversation content has not been assessed.</span></div>}
+            {(!current||current.revision!==caseData.revision||current.state==='unable_to_assess')&&<button className="button button-soft retry-button" onClick={()=>assess()} disabled={busy}><RefreshCw size={15}/>{busy?'Working…':current?.state==='unable_to_assess'?'Retry assessment':current?'Reassess current revision':'Assess current revision'}</button>}
+            <div className="assessment-divider"/><div className="assessment-section"><h3>Backend explanation</h3><p>{current?.reasons.length?current.reasons[current.reasons.length-1]:'No backend explanation is available for this revision.'}</p></div>
+            {current&&current.reasons.length>1&&<div className="assessment-section"><h3>Backend reason codes</h3><ul className="reason-list">{current.reasons.slice(0,-1).map((reason,i)=><li key={i}>{reason}</li>)}</ul></div>}
+            {current?.evidence.length ? <div className="assessment-section"><h3>Evidence from your messages</h3><div className="evidence-list">{current.evidence.map((ev,i)=>{const source=caseData.messages.find(message=>message.id===ev.messageId);return <button className="evidence-quote" key={`${ev.messageId}-${i}`} onClick={()=>showEvidence(ev)}><span className="quote-mark">“</span><span><b>{ev.quote}</b><small>{ev.reason}</small>{source?<span className="evidence-source"><small>Source message {source.order} · {source.channel}</small><span><Highlight text={source.text} evidence={[ev]}/></span></span>:<small>Source message is not present in the loaded case.</small>}<em>View in timeline <ArrowRight size={12}/></em></span></button>})}</div></div>:<div className="assessment-section"><h3>Evidence from your messages</h3><p className="muted-copy">No backend evidence excerpts were returned.</p></div>}
+            <div className="assessment-section next-step"><h3>Safe next action</h3><p>{current?.nextAction??'No backend next action is available.'}</p></div><div className="assessment-section checkpoint-entry"><button className="button button-primary" type="button" onClick={()=>{setNotice('');setShowPaymentCheckpoint(true)}}><ShieldCheck size={15}/> Open simulated Before You Pay checkpoint</button><p className="muted-copy">Simulation only. This does not initiate or interact with a payment.</p></div>
+            {current?.state==='review'&&<div className="assessment-section clarify-section"><h3>Clarification unavailable</h3><p>The backend has no clarification-answer operation. Do not treat this UI as having submitted or saved an answer.</p></div>}
+            <div className="assessment-section limitations"><h3>Backend limitations</h3>{current?.limitations.length?current.limitations.map((limitation,i)=><p key={i}>{limitation}</p>):<p className="muted-copy">No backend limitations are available because no assessment was returned.</p>}<p className="strong-disclaimer">No assessment result is a safety guarantee.</p></div>
+            {current&&<><div className="assessment-footer"><span>Extraction mode</span><b>{current.extractionMode}</b></div><div className="assessment-footer"><span>Assessment revision</span><b>{current.revision}</b></div></>}
+          </section>
+          {reviewEligible&&<section className="review-card owner-review-card"><div className="review-icon"><CircleHelp size={18}/></div><div><h3>Request human review</h3><p>This current backend assessment is eligible for the persisted review workflow.</p><p className="muted-copy">The backend stores a request; this does not guarantee reviewer availability or notification. Clarification-answer submission remains unavailable.</p><button className="button button-soft" type="button" onClick={()=>void requestHumanReview()} disabled={reviewBusy}>{reviewBusy?'Submitting…':'Request human review'}</button></div></section>}
+          {ownerReview&&<section className="review-card owner-review-status"><div className="review-icon"><Clock3 size={18}/></div><div><h3>Your persisted review request</h3><p><b>Status: {ownerReview.status}</b> · assessment revision {ownerReview.assessedRevision}{ownerReview.outcome?` · outcome: ${ownerReview.outcome}`:''}</p><p className="muted-copy">Submitted {ownerReview.submittedAt}. This owner view shows lifecycle status only; reviewer notes and queue details are not exposed here.</p><button className="button button-quiet" type="button" onClick={()=>void refreshOwnerReview()} disabled={reviewBusy}><RefreshCw size={14}/>{reviewBusy?'Refreshing…':'Refresh status'}</button></div></section>}
+          {ownerReview&&ownerReview.assessedRevision!==caseData.revision&&<div className="historical-note"><Clock3 size={15}/><span>This review request remains tied to assessment revision {ownerReview.assessedRevision}; newer case content has not been assessed by that request.</span></div>}
+          {reviewError&&<div className="inline-error reviewer-owner-error" role="alert"><AlertCircle size={16}/>{reviewError}</div>}{reviewNotice&&<div className="inline-notice reviewer-owner-notice" role="status"><Check size={15}/>{reviewNotice}</div>}
+        </aside></div>
+      </section>}
+    </main>
+    <footer className="site-footer" id="privacy"><div className="wrap footer-inner"><Logo/><p><LockKeyhole size={14}/> Sender identity is not verified. This tool is not a safety guarantee.</p><span>Use your judgment. Verify independently.</span></div></footer>
+    {showDelete&&<div className="modal-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)setShowDelete(false)}}><section className="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-title"><div className="modal-icon"><Trash2 size={20}/></div><button className="icon-button modal-close" onClick={()=>setShowDelete(false)} aria-label="Close confirmation"><X size={17}/></button><h2 id="delete-title">Delete this case?</h2><p>This sends a deletion request for case {caseData?.id} to the backend. If accepted, this app cannot restore it. Only proceed if you intend to delete this case.</p><div className="modal-actions"><button className="button button-quiet" onClick={()=>setShowDelete(false)} disabled={busy}>Keep case</button><button className="button button-danger" onClick={deleteCase} disabled={busy}>{busy?'Deleting…':'Delete case'}</button></div></section></div>}
+  </div>;
 }

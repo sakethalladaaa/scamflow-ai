@@ -4,7 +4,7 @@ from enum import StrEnum
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -51,6 +51,7 @@ class Settings(BaseSettings):
 
     trusted_origin: str = "http://127.0.0.1:8000"
     secure_cookies: bool | None = None
+    reviewer_token: SecretStr | None = None
 
     @field_validator("trusted_origin")
     @classmethod

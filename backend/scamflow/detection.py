@@ -1,4 +1,4 @@
-"""Phase 3 extraction, evidence validation, and Digital Arrest policy rules.
+"""Evidence extraction, strict validation, and deterministic scam policy rules.
 
 The development mock is deliberately narrow and deterministic. It is not a
 real scam detector and must never be presented as production inference.
@@ -25,7 +25,7 @@ MAX_EVIDENCE_QUOTE_CHARACTERS = 2_000
 
 
 class ObservationType(StrEnum):
-    """Supported evidence-linked observations for Digital Arrest detection."""
+    """Supported evidence-linked observations for deterministic policy rules."""
 
     AUTHORITY_CLAIM = "authority_claim"
     INVESTIGATION_ALLEGATION = "investigation_allegation"
@@ -33,7 +33,9 @@ class ObservationType(StrEnum):
     SECRECY = "secrecy"
     ISOLATION = "isolation"
     VERIFICATION_TRANSFER_REQUEST = "verification_transfer_request"
+    SUPPORT_IDENTITY_CLAIM = "support_identity_claim"
     CLAIMED_REFUND = "claimed_refund"
+    OUTGOING_PAYMENT_REQUEST = "outgoing_payment_request"
     ADVANCE_PAYMENT_REQUEST = "advance_payment_request"
     SENSITIVE_CREDENTIAL_REQUEST = "sensitive_credential_request"
     REMOTE_ACCESS_REQUEST = "remote_access_request"
@@ -145,7 +147,7 @@ def _context_for_match(text: str, start: int) -> EvidenceContext:
     """
 
     lowered = text.lower()
-    prefix = lowered[max(0, start - 80) : start]
+    prefix = text[max(0, start - 80) : start].lower()
 
     warning_markers = (
         "scam warning",
@@ -165,6 +167,16 @@ def _context_for_match(text: str, start: int) -> EvidenceContext:
         prefix,
     ):
         return EvidenceContext.NEGATED
+    negated_action = (
+        r"\b(?:do|does|did|will|would|should|must)\s+not\s+"
+        r"(?:(?:need|have)\s+)?(?:to\s+)?$",
+        r"\b(?:don't|doesn't|didn't|won't|wouldn't|shouldn't)\s+"
+        r"(?:(?:need|have)\s+to\s+)?$",
+        r"\bnot\s+required\s+to\s+$",
+        r"\bno\s+need\s+to\s+$",
+    )
+    if any(re.search(pattern, prefix) for pattern in negated_action):
+        return EvidenceContext.NEGATED
 
     return EvidenceContext.ASSERTED
 
@@ -177,16 +189,11 @@ def _find_literal_observations(
 ) -> list[dict[str, Any]]:
     """Return exact spans for configured literal development patterns."""
 
-    lowered = event.text.lower()
     observations: list[dict[str, Any]] = []
 
     for phrase in phrases:
-        search_from = 0
-        while True:
-            start = lowered.find(phrase, search_from)
-            if start < 0:
-                break
-            end = start + len(phrase)
+        for match in re.finditer(re.escape(phrase), event.text, flags=re.IGNORECASE):
+            start, end = match.span()
             observations.append(
                 {
                     "tactic": tactic.value,
@@ -197,8 +204,6 @@ def _find_literal_observations(
                     "context": _context_for_match(event.text, start).value,
                 }
             )
-            search_from = end
-
     return observations
 
 
@@ -270,6 +275,23 @@ class DevelopmentMockExtractor:
             ),
         ),
         (
+            ObservationType.SUPPORT_IDENTITY_CLAIM,
+            (
+                "customer support",
+                "customer service",
+                "customer care",
+                "refund support",
+                "refund team",
+                "refund department",
+                "refund agent",
+                "refund representative",
+                "billing support",
+                "billing department",
+                "support agent",
+                "support representative",
+            ),
+        ),
+        (
             ObservationType.CLAIMED_REFUND,
             (
                 "refund has been approved",
@@ -277,6 +299,39 @@ class DevelopmentMockExtractor:
                 "refund is pending",
                 "process your refund",
                 "receive your refund",
+                "refund has been processed",
+                "refund was processed",
+                "refund has been issued",
+                "refund was sent twice",
+                "refund was credited",
+                "we sent an extra refund",
+                "excess money was credited",
+                "we will refund you",
+                "we'll refund you",
+                "you will be refunded",
+                "you are eligible for a refund",
+                "reimbursement has been approved",
+                "we will reimburse you",
+                "you will be reimbursed",
+                "credited your account by mistake",
+                "accidentally credited your account",
+                "you were credited by mistake",
+                "mistaken credit to your account",
+                "excess amount was credited",
+                "you received an extra credit",
+            ),
+        ),
+        (
+            ObservationType.OUTGOING_PAYMENT_REQUEST,
+            (
+                "transfer money",
+                "transfer funds",
+                "send money",
+                "send funds",
+                "pay money",
+                "pay the money",
+                "wire funds",
+                "make an outgoing payment",
             ),
         ),
         (
@@ -285,6 +340,16 @@ class DevelopmentMockExtractor:
                 "pay a processing fee",
                 "pay the processing fee",
                 "pay a refundable fee",
+                "pay a fee",
+                "pay the fee",
+                "send a fee",
+                "send the fee",
+                "pay a refund fee",
+                "pay a verification fee",
+                "pay an administration fee",
+                "pay an administrative fee",
+                "transfer a processing fee",
+                "send a processing fee",
                 "send money before the refund",
                 "pay first to receive",
             ),
@@ -303,9 +368,13 @@ class DevelopmentMockExtractor:
             ObservationType.REMOTE_ACCESS_REQUEST,
             (
                 "install anydesk",
+                "download anydesk",
                 "install teamviewer",
+                "install rustdesk",
                 "install the remote access app",
+                "install remote access software",
                 "allow screen sharing",
+                "share your screen",
             ),
         ),
         (
@@ -316,6 +385,14 @@ class DevelopmentMockExtractor:
                 "refund was too high",
                 "repay the extra refund",
                 "return the excess refund",
+                "return the excess money",
+                "return excess money",
+                "return the extra money",
+                "return the excess funds",
+                "repay the excess amount",
+                "send the excess amount back",
+                "transfer back the excess amount",
+                "refund was sent twice",
             ),
         ),
         (
@@ -325,6 +402,12 @@ class DevelopmentMockExtractor:
                 "pay a personal account",
                 "transfer to another recipient",
                 "send it to this other upi",
+                "send it to a different bank account",
+                "send it to another account",
+                "transfer it to a different account",
+                "transfer it to another account",
+                "send it to a personal upi",
+                "transfer to a personal account",
             ),
         ),
     )
@@ -447,10 +530,25 @@ def validate_extraction(
     )
 
 
+def _purpose_claims_refund(purpose: str) -> bool:
+    """Recognize explicit refund/reimbursement purposes, not generic support."""
+
+    return bool(
+        re.search(
+            r"\b(?:refund|reimburs(?:e|ed|ement|es|ing)|chargeback|mistaken\s+credit|"
+            r"accidental\s+credit|excess\s+credit|credit\s+reversal)\b",
+            purpose,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
 def decide_digital_arrest(
     extraction: ValidatedExtraction,
+    *,
+    snapshot: CaseSnapshot | None = None,
 ) -> PolicyDecision:
-    """Apply transparent Digital Arrest rules, version DIGITAL_ARREST_RULE_VERSION."""
+    """Apply the existing Digital Arrest policy and additive Fake Refund rules."""
 
     common_limitations = (
         "This assessment uses a narrow development mock extractor, not production AI.",
@@ -489,17 +587,34 @@ def decide_digital_arrest(
     transfer = ObservationType.VERIFICATION_TRANSFER_REQUEST in active_types
     investigation = ObservationType.INVESTIGATION_ALLEGATION in active_types
     claimed_refund = ObservationType.CLAIMED_REFUND in active_types
+    support_identity = ObservationType.SUPPORT_IDENTITY_CLAIM in active_types
 
     refund_risk_tactics = (
+        ObservationType.VERIFICATION_TRANSFER_REQUEST,
+        ObservationType.OUTGOING_PAYMENT_REQUEST,
         ObservationType.ADVANCE_PAYMENT_REQUEST,
         ObservationType.SENSITIVE_CREDENTIAL_REQUEST,
         ObservationType.REMOTE_ACCESS_REQUEST,
         ObservationType.EXCESS_REFUND_REPAYMENT,
         ObservationType.RECIPIENT_MISMATCH,
     )
+    outgoing_payment_tactics = {
+        ObservationType.VERIFICATION_TRANSFER_REQUEST,
+        ObservationType.OUTGOING_PAYMENT_REQUEST,
+        ObservationType.ADVANCE_PAYMENT_REQUEST,
+        ObservationType.EXCESS_REFUND_REPAYMENT,
+        ObservationType.RECIPIENT_MISMATCH,
+    }
+    purpose_action_mismatch = bool(
+        snapshot is not None
+        and _purpose_claims_refund(snapshot.stated_purpose)
+        and active_types.intersection(outgoing_payment_tactics)
+    )
 
     if claimed_refund and active_types.intersection(refund_risk_tactics):
         used = [ObservationType.CLAIMED_REFUND.value]
+        if support_identity:
+            used.append(ObservationType.SUPPORT_IDENTITY_CLAIM.value)
         used.extend(
             tactic.value
             for tactic in refund_risk_tactics
@@ -509,14 +624,15 @@ def decide_digital_arrest(
             state="high_risk_indicators",
             reason_codes=("refund_linked_to_payment_credentials_or_mismatch",),
             explanation=(
-                "The submitted evidence links a claimed refund to an advance payment, "
-                "sensitive credential or remote-access request, excess-refund repayment, "
-                "or a different recipient."
+                "The submitted evidence links a claimed refund or excess-credit scenario "
+                "to an outgoing payment demand, advance fee, credential or remote-access "
+                "request, excess-return demand, or different recipient. This is a risk "
+                "signal, not proof of fraud."
             ),
             used_tactics=tuple(used),
             relationships=("claimed_refund_linked_to_suspicious_follow_up",),
             suggested_next_action=(
-                "Do not pay, share credentials, or install remote-access software; "
+                "Do not send money, share credentials, or install remote-access software; "
                 "verify the refund in the merchant's official app or website."
             ),
             limitations=common_limitations,
@@ -570,6 +686,33 @@ def decide_digital_arrest(
             limitations=common_limitations,
         )
 
+    if purpose_action_mismatch:
+        used = tuple(
+            dict.fromkeys(
+                observation.tactic.value
+                for observation in active
+                if observation.tactic in outgoing_payment_tactics
+                or observation.tactic
+                in {ObservationType.CLAIMED_REFUND, ObservationType.SUPPORT_IDENTITY_CLAIM}
+            )
+        )
+        return PolicyDecision(
+            state="needs_clarification_or_review",
+            reason_codes=("refund_purpose_outgoing_payment_mismatch",),
+            explanation=(
+                "The user-stated purpose refers to a refund or reimbursement, while a "
+                "source message contains an outgoing-payment demand. This mismatch is a "
+                "reason for independent review, not proof of fraud."
+            ),
+            used_tactics=used,
+            relationships=("refund_purpose_conflicts_with_outgoing_payment_demand",),
+            suggested_next_action=(
+                "Do not send funds until you independently verify the refund and any "
+                "payment request through the merchant's official channel."
+            ),
+            limitations=common_limitations,
+        )
+
     suspicious = {
         ObservationType.AUTHORITY_CLAIM,
         ObservationType.INVESTIGATION_ALLEGATION,
@@ -577,6 +720,7 @@ def decide_digital_arrest(
         ObservationType.SECRECY,
         ObservationType.ISOLATION,
         ObservationType.VERIFICATION_TRANSFER_REQUEST,
+        ObservationType.SUPPORT_IDENTITY_CLAIM,
         ObservationType.CLAIMED_REFUND,
         *refund_risk_tactics,
     }
@@ -597,7 +741,7 @@ def decide_digital_arrest(
             reason_codes=("incomplete_suspicious_context",),
             explanation=(
                 "Some active suspicious context is present, but the evidence does not "
-                "meet the Phase 3 high-risk rule combinations."
+                "meet the configured high-risk rule combinations."
             ),
             used_tactics=tuple(dict.fromkeys(suspicious_active)),
             relationships=("missing_context_for_high_risk_rule",),
@@ -612,7 +756,7 @@ def decide_digital_arrest(
         reason_codes=("no_phase3_high_risk_combination",),
         explanation=(
             "The supported development input did not contain the Phase 3 combinations "
-            "required for a stronger Digital Arrest warning."
+            "required for a stronger policy warning."
         ),
         used_tactics=tuple(dict.fromkeys(suspicious_active)),
         relationships=(),

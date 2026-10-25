@@ -81,12 +81,21 @@ def initialize_schema(database: Database) -> None:
     # during application/database initialization, not on module import.
     from . import models as _models  # noqa: F401
 
-    # Keep the Phase 1-3 create-all boundary intact, but exclude Phase 4 tables:
-    # those are installed by an explicit, recorded additive migration below.
-    phase4_tables = {"alert_memories", "assessment_alerts"}
+    # Keep the Phase 1-3 create-all boundary intact. Later tables are installed
+    # only by explicit, recorded additive migrations below.
+    migration_managed_tables = {
+        "alert_memories",
+        "assessment_alerts",
+        "review_requests",
+        "review_request_idempotency_records",
+    }
     Base.metadata.create_all(
         database.engine,
-        tables=[table for table in Base.metadata.sorted_tables if table.name not in phase4_tables],
+        tables=[
+            table
+            for table in Base.metadata.sorted_tables
+            if table.name not in migration_managed_tables
+        ],
     )
     _apply_additive_migrations(database)
 
@@ -110,6 +119,7 @@ def _apply_additive_migrations(database: Database) -> None:
             {"version": "0001_alert_memory"},
         )
         if installed is not None:
+            _apply_review_request_migration(connection)
             return
 
         connection.execute(
@@ -156,3 +166,112 @@ def _apply_additive_migrations(database: Database) -> None:
             ),
             {"version": "0001_alert_memory"},
         )
+        _apply_review_request_migration(connection)
+
+
+def _apply_review_request_migration(connection) -> None:
+    """Install persisted review requests as an idempotent SQLite migration."""
+
+    installed = connection.scalar(
+        text("SELECT version FROM schema_migrations WHERE version = :version"),
+        {"version": "0002_review_requests"},
+    )
+    if installed is not None:
+        return
+
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS review_requests (
+                id VARCHAR(32) PRIMARY KEY,
+                case_id VARCHAR(32) NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+                owner_id VARCHAR(32) NOT NULL REFERENCES owner_sessions(id) ON DELETE CASCADE,
+                assessment_id VARCHAR(32) NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
+                assessed_revision INTEGER NOT NULL,
+                status VARCHAR(16) NOT NULL CHECK (status IN ('open', 'resolved')),
+                submitted_at INTEGER NOT NULL,
+                resolved_at INTEGER,
+                outcome VARCHAR(32),
+                reviewer_note TEXT,
+                CHECK (
+                    (status = 'open' AND resolved_at IS NULL AND outcome IS NULL
+                        AND reviewer_note IS NULL)
+                    OR
+                    (status = 'resolved' AND resolved_at IS NOT NULL AND outcome IN
+                        ('follow_up', 'escalated', 'no_action', 'inconclusive'))
+                ),
+                CHECK (reviewer_note IS NULL OR length(reviewer_note) <= 1000)
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_review_requests_case_id "
+            "ON review_requests(case_id)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_review_requests_owner_id "
+            "ON review_requests(owner_id)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_review_requests_assessment_id "
+            "ON review_requests(assessment_id)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_review_requests_one_open_case_revision "
+            "ON review_requests(case_id, assessed_revision) WHERE status = 'open'"
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS review_request_idempotency_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id VARCHAR(32) NOT NULL
+                    REFERENCES owner_sessions(id) ON DELETE CASCADE,
+                operation_scope VARCHAR(96) NOT NULL,
+                request_key VARCHAR(128) NOT NULL,
+                request_fingerprint VARCHAR(64) NOT NULL,
+                target_case_id VARCHAR(32) REFERENCES cases(id) ON DELETE SET NULL,
+                review_request_id VARCHAR(32)
+                    REFERENCES review_requests(id) ON DELETE SET NULL,
+                result_status_code INTEGER NOT NULL,
+                resource_deleted BOOLEAN NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                CONSTRAINT uq_review_request_idempotency_owner_scope_key
+                    UNIQUE (owner_id, operation_scope, request_key)
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_review_request_idempotency_records_owner_id "
+            "ON review_request_idempotency_records(owner_id)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_review_request_idempotency_records_target_case_id "
+            "ON review_request_idempotency_records(target_case_id)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_review_request_idempotency_records_review_request_id "
+            "ON review_request_idempotency_records(review_request_id)"
+        )
+    )
+    connection.execute(
+        text(
+            "INSERT INTO schema_migrations(version, applied_at) "
+            "VALUES ('0002_review_requests', CAST(strftime('%s','now') AS INTEGER))"
+        )
+    )

@@ -2,11 +2,14 @@
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -274,3 +277,78 @@ class AssessmentAlert(Base):
     prior_warning_state: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     assessment: Mapped[Assessment] = relationship(back_populates="alert")
+
+
+class ReviewRequest(Base):
+    """Owner-requested review of one immutable persisted assessment revision."""
+
+    __tablename__ = "review_requests"
+    __table_args__ = (
+        CheckConstraint("status IN ('open', 'resolved')", name="ck_review_requests_status"),
+        CheckConstraint(
+            "(status = 'open' AND resolved_at IS NULL AND outcome IS NULL "
+            "AND reviewer_note IS NULL) "
+            "OR (status = 'resolved' AND resolved_at IS NOT NULL AND outcome IN "
+            "('follow_up', 'escalated', 'no_action', 'inconclusive'))",
+            name="ck_review_requests_resolution",
+        ),
+        CheckConstraint(
+            "reviewer_note IS NULL OR length(reviewer_note) <= 1000",
+            name="ck_review_requests_note_length",
+        ),
+        Index(
+            "uq_review_requests_one_open_case_revision",
+            "case_id",
+            "assessed_revision",
+            unique=True,
+            sqlite_where=text("status = 'open'"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    case_id: Mapped[str] = mapped_column(
+        ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    owner_id: Mapped[str] = mapped_column(
+        ForeignKey("owner_sessions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    assessment_id: Mapped[str] = mapped_column(
+        ForeignKey("assessments.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    assessed_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    submitted_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    resolved_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    outcome: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    reviewer_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ReviewRequestIdempotencyRecord(Base):
+    """Owner-scoped create retry metadata, retaining no case data after deletion."""
+
+    __tablename__ = "review_request_idempotency_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_id",
+            "operation_scope",
+            "request_key",
+            name="uq_review_request_idempotency_owner_scope_key",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_id: Mapped[str] = mapped_column(
+        ForeignKey("owner_sessions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    operation_scope: Mapped[str] = mapped_column(String(96), nullable=False)
+    request_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_case_id: Mapped[str | None] = mapped_column(
+        ForeignKey("cases.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    review_request_id: Mapped[str | None] = mapped_column(
+        ForeignKey("review_requests.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    result_status_code: Mapped[int] = mapped_column(Integer, nullable=False)
+    resource_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False)

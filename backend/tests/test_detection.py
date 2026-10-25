@@ -14,7 +14,7 @@ from backend.scamflow.detection import (
 )
 
 
-def snapshot(*texts: str) -> CaseSnapshot:
+def snapshot(*texts: str, purpose: str = "Verification") -> CaseSnapshot:
     return CaseSnapshot(
         case_id="case-1",
         revision=1,
@@ -27,7 +27,7 @@ def snapshot(*texts: str) -> CaseSnapshot:
             )
             for index, text in enumerate(texts, start=1)
         ),
-        stated_purpose="Verification",
+        stated_purpose=purpose,
         amount_decimal="5000",
         recipient_reference="recipient-1",
     )
@@ -396,3 +396,132 @@ def test_oversized_extraction_is_rejected() -> None:
             extraction_mode="test",
             extraction_version="v1",
         )
+
+
+
+def test_fake_refund_support_identity_promise_and_fee_are_high_risk() -> None:
+    case_snapshot = snapshot(
+        "Customer support: your refund has been approved. "
+        "Pay a processing fee to receive it."
+    )
+
+    validated = validated_from_mock(case_snapshot)
+    decision = decide_digital_arrest(validated, snapshot=case_snapshot)
+
+    assert decision.state == "high_risk_indicators"
+    assert decision.reason_codes == ("refund_linked_to_payment_credentials_or_mismatch",)
+    assert ObservationType.SUPPORT_IDENTITY_CLAIM.value in decision.used_tactics
+    assert ObservationType.CLAIMED_REFUND.value in decision.used_tactics
+    assert ObservationType.ADVANCE_PAYMENT_REQUEST.value in decision.used_tactics
+    assert all(
+        case_snapshot.events[0].text[item.start : item.end] == item.quote
+        for item in validated.observations
+    )
+
+
+def test_legitimate_refund_no_fee_control_is_not_high_risk() -> None:
+    case_snapshot = snapshot(
+        "Customer support confirms your refund has been processed to the original payment method. "
+        "You do not need to pay a fee."
+    )
+
+    validated = validated_from_mock(case_snapshot)
+    decision = decide_digital_arrest(validated, snapshot=case_snapshot)
+
+    fee = next(
+        item
+        for item in validated.observations
+        if item.tactic is ObservationType.ADVANCE_PAYMENT_REQUEST
+    )
+    assert fee.context is EvidenceContext.NEGATED
+    assert decision.state == "no_strong_indicators"
+    assert decision.reason_codes == ("no_phase3_high_risk_combination",)
+
+
+def test_refund_purpose_and_outgoing_payment_mismatch_needs_review() -> None:
+    case_snapshot = snapshot(
+        "Transfer money to account 123 to complete the requested resolution.",
+        purpose="Refund resolution",
+    )
+
+    validated = validated_from_mock(case_snapshot)
+    decision = decide_digital_arrest(validated, snapshot=case_snapshot)
+
+    outgoing = next(
+        item
+        for item in validated.observations
+        if item.tactic is ObservationType.OUTGOING_PAYMENT_REQUEST
+    )
+    assert decision.state == "needs_clarification_or_review"
+    assert decision.reason_codes == ("refund_purpose_outgoing_payment_mismatch",)
+    assert decision.relationships == ("refund_purpose_conflicts_with_outgoing_payment_demand",)
+    assert outgoing.event_id == case_snapshot.events[0].event_id
+    assert outgoing.quote == "Transfer money"
+    assert case_snapshot.events[0].text[outgoing.start : outgoing.end] == outgoing.quote
+    assert "not proof of fraud" in decision.explanation
+
+
+def test_mistaken_credit_and_excess_return_to_different_account_are_linked() -> None:
+    case_snapshot = snapshot(
+        "We accidentally credited your account by mistake. Return the excess money and "
+        "send it to a different account."
+    )
+
+    validated = validated_from_mock(case_snapshot)
+    decision = decide_digital_arrest(validated, snapshot=case_snapshot)
+
+    assert decision.state == "high_risk_indicators"
+    assert ObservationType.CLAIMED_REFUND.value in decision.used_tactics
+    assert ObservationType.EXCESS_REFUND_REPAYMENT.value in decision.used_tactics
+    assert ObservationType.RECIPIENT_MISMATCH.value in decision.used_tactics
+
+
+def test_unicode_prefix_keeps_refund_evidence_offsets_in_python_code_points() -> None:
+    text = "İ 📩 Customer support: your refund has been approved. Pay a processing fee."
+    case_snapshot = snapshot(text)
+
+    validated = validated_from_mock(case_snapshot)
+    identity = next(
+        item
+        for item in validated.observations
+        if item.tactic is ObservationType.SUPPORT_IDENTITY_CLAIM
+    )
+    source = case_snapshot.events[0]
+
+    assert identity.start == text.index("Customer support")
+    assert identity.end == identity.start + len("Customer support")
+    assert source.text[identity.start : identity.end] == identity.quote
+    assert identity.event_id == source.event_id
+
+
+def test_remote_access_without_refund_claim_is_review_context_not_high_risk() -> None:
+    case_snapshot = snapshot("Allow screen sharing so the support agent can help.")
+
+    decision = decide_digital_arrest(
+        validated_from_mock(case_snapshot),
+        snapshot=case_snapshot,
+    )
+
+    assert decision.state == "needs_clarification_or_review"
+    assert decision.state != "high_risk_indicators"
+
+
+def test_digital_arrest_combination_is_unchanged_with_case_snapshot() -> None:
+    case_snapshot = snapshot(
+        "I am a police officer.",
+        "You will be arrested.",
+        "Stay on the call.",
+    )
+
+    decision = decide_digital_arrest(
+        validated_from_mock(case_snapshot),
+        snapshot=case_snapshot,
+    )
+
+    assert decision.state == "high_risk_indicators"
+    assert decision.reason_codes == ("authority_coercion_isolation_or_secrecy",)
+    assert decision.used_tactics == (
+        "authority_claim",
+        "threat_coercion",
+        "isolation",
+    )

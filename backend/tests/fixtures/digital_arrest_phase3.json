@@ -129,6 +129,14 @@
           "start": 0,
           "end": 31,
           "context": "asserted"
+        },
+        {
+          "tactic": "outgoing_payment_request",
+          "event_id": "evt-3",
+          "quote": "Transfer money",
+          "start": 0,
+          "end": 14,
+          "context": "asserted"
         }
       ],
       "expected_prefix_states": [
