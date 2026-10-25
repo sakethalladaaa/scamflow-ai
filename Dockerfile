@@ -10,7 +10,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     SCAMFLOW_DATABASE_PATH=/data/scamflow.sqlite3
 WORKDIR /app
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md alembic.ini ./
 COPY backend/ ./backend/
 RUN python -m pip install --no-cache-dir .
 COPY --from=frontend-build /app/frontend/dist ./frontend/dist

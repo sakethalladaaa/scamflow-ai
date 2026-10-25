@@ -4,7 +4,7 @@ from enum import StrEnum
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -43,13 +43,22 @@ class Settings(BaseSettings):
     log_level: LogLevel = LogLevel.INFO
 
     database_path: Path = Path("data/scamflow.sqlite3")
+    database_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("DATABASE_URL", "SCAMFLOW_DATABASE_URL"),
+    )
     sqlite_busy_timeout_ms: int = Field(default=5_000, ge=1, le=60_000)
 
     session_ttl_seconds: int = Field(default=86_400, ge=60, le=604_800)
     case_retention_seconds: int = Field(default=86_400, ge=60, le=604_800)
     assessment_timeout_seconds: float = Field(default=2.0, ge=0.01, le=30.0)
+    extractor_mode: str = Field(default="rules", pattern="^(rules|provider|none)$")
 
     trusted_origin: str = "http://127.0.0.1:8000"
+    max_request_bytes: int = Field(default=1_000_000, ge=16_384, le=10_000_000)
+    rate_limit_per_minute: int = Field(default=60, ge=1, le=10_000)
+    auth_rate_limit_per_minute: int = Field(default=10, ge=1, le=1_000)
+    cleanup_interval_seconds: int = Field(default=3_600, ge=60, le=86_400)
     secure_cookies: bool | None = None
     reviewer_token: SecretStr | None = None
 

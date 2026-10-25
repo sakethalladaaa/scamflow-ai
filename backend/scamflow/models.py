@@ -16,6 +16,25 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .database import Base
 
 
+class Account(Base):
+    """An authenticated user, reviewer, or administrator account."""
+
+    __tablename__ = "accounts"
+    __table_args__ = (UniqueConstraint("email", name="uq_accounts_email"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), nullable=False, index=True)
+    password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False, default="user")
+    failed_login_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    locked_until: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    sessions: Mapped[list["OwnerSession"]] = relationship(back_populates="account")
+
+
 class OwnerSession(Base):
     """Anonymous owner session identified externally only by an opaque token."""
 
@@ -25,6 +44,11 @@ class OwnerSession(Base):
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
     created_at: Mapped[int] = mapped_column(Integer, nullable=False)
     expires_at: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    account_id: Mapped[str | None] = mapped_column(
+        ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+    account: Mapped[Account | None] = relationship(back_populates="sessions")
 
     cases: Mapped[list["Case"]] = relationship(
         back_populates="owner",

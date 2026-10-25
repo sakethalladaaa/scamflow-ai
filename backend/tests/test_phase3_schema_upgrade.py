@@ -23,6 +23,7 @@ def test_existing_phase2_database_gains_phase3_tables_without_losing_cases(
     try:
         # Simulate the Phase 2 schema by creating only the original four tables.
         original_tables = [
+                Base.metadata.tables["accounts"],
             Base.metadata.tables["owner_sessions"],
             Base.metadata.tables["cases"],
             Base.metadata.tables["events"],

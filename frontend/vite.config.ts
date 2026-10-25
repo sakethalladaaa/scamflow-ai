@@ -15,8 +15,11 @@ export default defineConfig({
     host: '127.0.0.1',
     proxy: {
       '/session': 'http://127.0.0.1:8000',
+      '/auth': 'http://127.0.0.1:8000',
       '/cases': 'http://127.0.0.1:8000',
+      '/reviewer': 'http://127.0.0.1:8000',
       '/health': 'http://127.0.0.1:8000',
+      '/ready': 'http://127.0.0.1:8000',
     },
   }
 });

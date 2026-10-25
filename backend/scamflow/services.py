@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -555,3 +555,12 @@ def payment_context_from_case(case: Case) -> PaymentContext:
         amount=case.amount_decimal,
         recipient_reference=case.recipient_reference,
     )
+
+
+def cleanup_expired_data(database: Database, *, now: int) -> int:
+    """Delete expired cases and owner sessions without touching active data."""
+
+    with database.session_factory.begin() as session:
+        cases = session.execute(delete(Case).where(Case.expires_at <= now))
+        session.execute(delete(OwnerSession).where(OwnerSession.expires_at <= now))
+        return int(cases.rowcount or 0)

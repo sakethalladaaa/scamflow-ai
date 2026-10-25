@@ -73,10 +73,6 @@ export default function ReviewerDashboard({ onReturn }: { onReturn: () => void }
   const [notice, setNotice] = useState('');
 
   async function loadQueue(nextOffset = offset) {
-    if (!token.trim()) {
-      setError('Paste the reviewer token to connect to the restricted queue.');
-      return;
-    }
     const requestToken = token;
     setBusy(true);
     setError('');
@@ -152,10 +148,10 @@ export default function ReviewerDashboard({ onReturn }: { onReturn: () => void }
     <header className="topbar"><div className="topbar-inner"><a className="brand" href="/" onClick={event => { event.preventDefault(); onReturn(); }}><span className="brand-mark"><ShieldCheck size={20}/></span><span>scamflow<span className="brand-ai"> AI</span></span></a><button className="back-link" type="button" onClick={onReturn}><ArrowLeft size={15}/> Return to ScamFlow</button></div></header>
     <main className="reviewer-page wrap">
       <div className="reviewer-intro"><div className="step-label"><span><LockKeyhole size={13}/></span> RESTRICTED REVIEW WORKFLOW</div><h1>Reviewer dashboard</h1><p>This view retrieves persisted review requests and assessment snapshots from the connected backend. It does not create a new assessment or alter its state.</p></div>
-      <section className="reviewer-security-note" role="note"><LockKeyhole size={18}/><div><b>Reviewer access is separately authorized.</b><p>Paste the reviewer token manually. It stays in this page's React memory, is sent only in <code>X-ScamFlow-Reviewer-Token</code>, and is not stored in browser storage, a URL, or a request body. Reviewer calls omit cookie credentials.</p></div></section>
+      <section className="reviewer-security-note" role="note"><LockKeyhole size={18}/><div><b>Reviewer access is separately authorized.</b><p>Use a signed-in reviewer account in production. Local development may use a manually entered token; it stays in this page's React memory and is never stored in browser storage, a URL, or a request body.</p></div></section>
       <form className="reviewer-connect" onSubmit={event => { event.preventDefault(); void loadQueue(0); }}>
         <label className="field" htmlFor="reviewer-token">Reviewer token<input id="reviewer-token" type="password" value={token} disabled={busy} onChange={event => { tokenRef.current=event.target.value;setToken(event.target.value);setQueue(null);setDetail(null);setSelectedId(null);setError('');setNotice(''); }} autoComplete="off" spellCheck={false} autoCapitalize="none" /></label>
-        <button className="button button-primary" type="submit" disabled={busy||!token.trim()}><LockKeyhole size={15}/>{busy?'Connecting…':'Connect / refresh queue'}</button>
+        <button className="button button-primary" type="submit" disabled={busy}><LockKeyhole size={15}/>{busy?'Connecting…':'Connect / refresh queue'}</button>
       </form>
       {error&&<div className="inline-error reviewer-message" role="alert"><AlertCircle size={17}/>{error}</div>}
       {notice&&<div className="inline-notice reviewer-message" role="status">{notice}</div>}

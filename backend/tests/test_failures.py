@@ -67,11 +67,12 @@ def test_production_session_cookie_is_secure(tmp_path: Path) -> None:
 
     with TestClient(app, base_url=origin) as client:
         response = client.post(
-            "/session",
+            "/auth/register",
             headers={"Origin": origin, CSRF_HEADER_NAME: "1"},
+            json={"email": "secure@example.com", "password": "correct horse battery staple"},
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 201
         cookie = response.headers["set-cookie"].lower()
         assert "httponly" in cookie
         assert "samesite=strict" in cookie

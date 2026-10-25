@@ -8,7 +8,10 @@ version = "0.1.0"
 description = "Backend foundation for ScamFlow AI — Before-You-Pay Safety Copilot."
 requires-python = ">=3.11,<3.12"
 dependencies = [
+    "alembic==1.16.5",
+    "argon2-cffi==25.1.0",
     "fastapi==0.142.2",
+    "psycopg[binary]==3.2.10",
     "uvicorn==0.54.0",
     "pydantic==2.13.5",
     "pydantic-settings==2.15.0",
@@ -19,6 +22,7 @@ dependencies = [
 dev = [
     "pytest==9.1.1",
     "httpx==0.28.1",
+    "pytest-asyncio==1.2.0",
     "ruff==0.16.10",
 ]
 

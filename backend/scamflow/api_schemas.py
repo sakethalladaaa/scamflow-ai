@@ -16,6 +16,28 @@ class SessionResponse(BaseModel):
     expires_at: datetime
 
 
+class RegisterRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=12, max_length=256)
+
+
+class LoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class AccountResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    account_id: str
+    email: str
+    role: Literal["user", "reviewer", "admin"]
+
+
 class CreateCaseRequest(BaseModel):
     """A consented case creation request."""
 

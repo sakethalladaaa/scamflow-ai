@@ -1,5 +1,6 @@
 """FastAPI application factory for ScamFlow AI."""
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -8,11 +9,14 @@ from typing import Annotated
 
 from fastapi import FastAPI, Header, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from .api_schemas import (
+    AccountResponse,
     AlertResponse,
     AppendEventsRequest,
     AssessCaseRequest,
@@ -24,7 +28,9 @@ from .api_schemas import (
     CreateReviewRequestResponse,
     ErrorDetail,
     ErrorResponse,
+    LoginRequest,
     MutationResponse,
+    RegisterRequest,
     ResolveReviewRequestRequest,
     ResolveReviewRequestResponse,
     ReviewerAssessmentSnapshotResponse,
@@ -37,8 +43,10 @@ from .api_schemas import (
     StoredEventResponse,
 )
 from .assessment_services import assess_case, get_latest_assessment
-from .database import create_database, initialize_schema
-from .detection import MOCK_EXTRACTION_MODE, DevelopmentMockExtractor, Extractor
+from .auth_services import login_account, logout_account, register_account
+from .database import create_database, initialize_schema, run_postgres_migrations
+from .detection import MOCK_EXTRACTION_MODE, DevelopmentMockExtractor, Extractor, RulesOnlyExtractor
+from .models import Account
 from .review_services import (
     create_review_request,
     get_owner_review_request,
@@ -60,6 +68,7 @@ from .services import (
     append_events,
     authenticate_owner,
     bootstrap_session,
+    cleanup_expired_data,
     create_case,
     delete_case,
     epoch_to_datetime,
@@ -90,17 +99,35 @@ def create_app(
         raise ValueError("The development mock extractor cannot be used in production.")
 
     resolved_extractor: Extractor | None = extractor
-    if resolved_extractor is None and resolved_settings.environment is not Environment.PRODUCTION:
-        resolved_extractor = DevelopmentMockExtractor()
+    if resolved_extractor is None:
+        if resolved_settings.extractor_mode == "rules":
+            resolved_extractor = (
+                DevelopmentMockExtractor()
+                if resolved_settings.environment is not Environment.PRODUCTION
+                else RulesOnlyExtractor()
+            )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         database = create_database(resolved_settings)
-        initialize_schema(database)
+        if database.engine.dialect.name == "postgresql":
+            run_postgres_migrations(database)
+        else:
+            initialize_schema(database)
         app.state.database = database
+        cleanup_expired_data(database, now=app.state.clock())
+
+        async def cleanup_loop() -> None:
+            while True:
+                await asyncio.sleep(resolved_settings.cleanup_interval_seconds)
+                cleanup_expired_data(database, now=app.state.clock())
+
+        cleanup_task = asyncio.create_task(cleanup_loop())
         try:
             yield
         finally:
+            cleanup_task.cancel()
+            await asyncio.gather(cleanup_task, return_exceptions=True)
             database.dispose()
 
     app = FastAPI(
@@ -111,6 +138,37 @@ def create_app(
     app.state.settings = resolved_settings
     app.state.clock = clock
     app.state.extractor = resolved_extractor
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[resolved_settings.trusted_origin],
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type", "Idempotency-Key", CSRF_HEADER_NAME, REVIEWER_HEADER_NAME],
+    )
+
+    @app.middleware("http")
+    async def security_middleware(request: Request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > resolved_settings.max_request_bytes:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "detail": {"code": "request_too_large", "message": "Request is too large."}
+                },
+            )
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
+            "base-uri 'self'; frame-ancestors 'none'"
+        )
+        if resolved_settings.environment is Environment.PRODUCTION:
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        return response
 
     @app.exception_handler(ServiceError)
     async def handle_service_error(
@@ -164,13 +222,23 @@ def create_app(
 
     def require_owner(request: Request):
         token = request.cookies.get(SESSION_COOKIE_NAME)
-        return authenticate_owner(
+        owner = authenticate_owner(
             app.state.database,
             token=token,
             now=now(),
         )
+        if resolved_settings.environment is Environment.PRODUCTION and owner.account_id is None:
+            raise ServiceError(401, "account_required", "Sign in is required.")
+        return owner
 
-    def require_reviewer(presented_token: str | None) -> None:
+    def require_reviewer(request: Request, presented_token: str | None) -> None:
+        """Require a role-backed account in production, token only in local dev."""
+
+        if resolved_settings.environment is Environment.PRODUCTION:
+            account = account_from_request(request)
+            if account.role not in {"reviewer", "admin"}:
+                raise ServiceError(403, "reviewer_role_required", "Reviewer access is required.")
+            return
         configured = app.state.settings.reviewer_token
         if configured is None or not configured.get_secret_value().strip():
             raise ServiceError(
@@ -187,6 +255,27 @@ def create_app(
                 "reviewer_auth_required",
                 "Reviewer authorization is required.",
             )
+
+    def account_from_request(request: Request) -> Account:
+        owner = require_owner(request)
+        if owner.account_id is None:
+            raise ServiceError(401, "account_required", "Sign in is required.")
+        with app.state.database.session_factory() as session:
+            account = session.get(Account, owner.account_id)
+            if account is None or not account.active:
+                raise ServiceError(401, "account_invalid", "Sign in is required.")
+            return account
+
+    def set_session_cookie(response: Response, token: str, expires_at: int) -> None:
+        response.set_cookie(
+            key=SESSION_COOKIE_NAME,
+            value=token,
+            max_age=max(0, expires_at - now()),
+            httponly=True,
+            secure=app.state.settings.session_cookie_secure,
+            samesite="strict",
+            path="/",
+        )
 
     def require_idempotency_key(
         idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
@@ -235,6 +324,65 @@ def create_app(
 
         return HealthResponse()
 
+    @app.get("/ready", response_model=HealthResponse)
+    def readiness() -> HealthResponse:
+        """Verify database connectivity for deployment readiness checks."""
+
+        with app.state.database.engine.connect() as connection:
+            connection.execute(select(1))
+        return HealthResponse()
+
+    @app.post("/auth/register", response_model=AccountResponse, status_code=201)
+    def register_route(
+        request: Request, response: Response, body: RegisterRequest
+    ) -> AccountResponse:
+        require_csrf(request)
+        result = register_account(
+            app.state.database,
+            app.state.settings,
+            email=body.email,
+            password=body.password,
+            now=now(),
+        )
+        set_session_cookie(response, result.token, result.expires_at)
+        return AccountResponse(
+            account_id=result.account.id,
+            email=result.account.email,
+            role=result.account.role,
+        )
+
+    @app.post("/auth/login", response_model=AccountResponse)
+    def login_route(request: Request, response: Response, body: LoginRequest) -> AccountResponse:
+        require_csrf(request)
+        client_key = request.client.host if request.client else "unknown"
+        result = login_account(
+            app.state.database,
+            app.state.settings,
+            email=body.email,
+            password=body.password,
+            client_key=client_key,
+            now=now(),
+        )
+        set_session_cookie(response, result.token, result.expires_at)
+        return AccountResponse(
+            account_id=result.account.id,
+            email=result.account.email,
+            role=result.account.role,
+        )
+
+    @app.get("/auth/me", response_model=AccountResponse)
+    def me_route(request: Request) -> AccountResponse:
+        account = account_from_request(request)
+        return AccountResponse(account_id=account.id, email=account.email, role=account.role)
+
+    @app.post("/auth/logout", status_code=204)
+    def logout_route(request: Request, response: Response) -> Response:
+        require_csrf(request)
+        logout_account(app.state.database, request.cookies.get(SESSION_COOKIE_NAME))
+        response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+        response.status_code = 204
+        return response
+
     @app.post(
         "/session",
         response_model=SessionResponse,
@@ -244,6 +392,8 @@ def create_app(
         """Reuse a valid anonymous owner session or create an isolated replacement."""
 
         require_csrf(request)
+        if resolved_settings.environment is Environment.PRODUCTION:
+            raise ServiceError(401, "account_required", "Sign in is required.")
         result = bootstrap_session(
             app.state.database,
             app.state.settings,
@@ -586,13 +736,14 @@ def create_app(
         responses={401: {"model": ErrorResponse}, 503: {"model": ErrorResponse}},
     )
     def reviewer_queue_route(
+        request: Request,
         reviewer_token: Annotated[str | None, Header(alias=REVIEWER_HEADER_NAME)] = None,
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
         offset: Annotated[int, Query(ge=0, le=100_000)] = 0,
     ) -> ReviewerQueueResponse:
         """List open requests only for a caller with explicit reviewer authorization."""
 
-        require_reviewer(reviewer_token)
+        require_reviewer(request, reviewer_token)
         rows, total = list_open_review_requests(
             app.state.database,
             now=now(),
@@ -627,12 +778,13 @@ def create_app(
         },
     )
     def reviewer_review_request_detail_route(
+        request: Request,
         review_request_id: str,
         reviewer_token: Annotated[str | None, Header(alias=REVIEWER_HEADER_NAME)] = None,
     ) -> ReviewerReviewRequestDetailResponse:
         """Return reviewer-only request, persisted assessment, and exact source evidence."""
 
-        require_reviewer(reviewer_token)
+        require_reviewer(request, reviewer_token)
         detail = get_reviewer_review_detail(
             app.state.database,
             review_request_id=review_request_id,
@@ -652,6 +804,7 @@ def create_app(
         },
     )
     def reviewer_resolve_request_route(
+        request: Request,
         review_request_id: str,
         body: ResolveReviewRequestRequest,
         reviewer_token: Annotated[str | None, Header(alias=REVIEWER_HEADER_NAME)] = None,
@@ -659,7 +812,9 @@ def create_app(
     ) -> ResolveReviewRequestResponse:
         """Resolve one open workflow request; this never changes its assessment."""
 
-        require_reviewer(reviewer_token)
+        require_reviewer(request, reviewer_token)
+        if resolved_settings.environment is Environment.PRODUCTION:
+            require_csrf(request)
         key = require_idempotency_key(idempotency_key)
         result = resolve_review_request(
             app.state.database,

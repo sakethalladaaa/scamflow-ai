@@ -16,7 +16,8 @@ export interface ReviewerEvidence { tactic: string; eventId: string; sourceOrder
 export interface ReviewerAssessment { assessmentId: string; caseId: string; assessedRevision: number; state: BackendAssessmentState; reasonCodes: string[]; explanation: string; evidence: ReviewerEvidence[]; alert: { visible: boolean; reason: string; priorWarningState: string | null }; tacticsUsed: string[]; relationships: string[]; suggestedNextAction: string; limitations: string[]; extractionMode: string; extractionVersion: string; ruleVersion: string; schemaVersion: string; createdAt: string; isCurrent: boolean; paymentContext: { statedPurpose: string; amount: string | null; recipientReference: string | null }; }
 export interface ReviewerDetail extends ReviewRequestStatus { reviewerNote: string | null; assessment: ReviewerAssessment; }
 export interface ResolvedReviewRequest extends ReviewRequestStatus { reviewerNote: string | null; idempotentReplay: boolean; }
-export interface ApiAdapter { createCase(input: NewCase): Promise<CaseRecord>; getCase(id: string): Promise<CaseRecord>; appendMessage(id: string, text: string, expectedRevision: number): Promise<CaseRecord>; addClarification(id: string, answers: string[], expectedRevision: number): Promise<CaseRecord>; assess(id: string, expectedRevision: number, messages?: Message[]): Promise<CaseRecord>; createReviewRequest(caseId: string, assessmentId: string, expectedRevision: number): Promise<CreatedReviewRequest>; getOwnerReviewRequest(caseId: string, reviewRequestId: string): Promise<ReviewRequestStatus>; getReviewerQueue(token: string, limit: number, offset: number): Promise<ReviewerQueue>; getReviewerDetail(token: string, reviewRequestId: string): Promise<ReviewerDetail>; resolveReviewerRequest(token: string, reviewRequestId: string, outcome: ReviewOutcome, note?: string): Promise<ResolvedReviewRequest>; deleteCase(id: string): Promise<void>; }
+export interface Account { accountId: string; email: string; role: 'user' | 'reviewer' | 'admin'; }
+export interface ApiAdapter { register(email: string, password: string): Promise<Account>; login(email: string, password: string): Promise<Account>; logout(): Promise<void>; getCurrentAccount(): Promise<Account>; createCase(input: NewCase): Promise<CaseRecord>; getCase(id: string): Promise<CaseRecord>; appendMessage(id: string, text: string, expectedRevision: number): Promise<CaseRecord>; addClarification(id: string, answers: string[], expectedRevision: number): Promise<CaseRecord>; assess(id: string, expectedRevision: number, messages?: Message[]): Promise<CaseRecord>; createReviewRequest(caseId: string, assessmentId: string, expectedRevision: number): Promise<CreatedReviewRequest>; getOwnerReviewRequest(caseId: string, reviewRequestId: string): Promise<ReviewRequestStatus>; getReviewerQueue(token: string, limit: number, offset: number): Promise<ReviewerQueue>; getReviewerDetail(token: string, reviewRequestId: string): Promise<ReviewerDetail>; resolveReviewerRequest(token: string, reviewRequestId: string, outcome: ReviewOutcome, note?: string): Promise<ResolvedReviewRequest>; deleteCase(id: string): Promise<void>; }
 
 export class ApiError extends Error {
   constructor(message: string, public status: number, public code?: string) { super(message); this.name = 'ApiError'; }
@@ -38,6 +39,7 @@ interface BackendReviewerEvidence { tactic: string; event_id: string; source_ord
 interface BackendReviewerAssessment { assessment_id: string; case_id: string; assessed_revision: number; state: BackendAssessmentState; reason_codes: string[]; explanation: string; evidence: BackendReviewerEvidence[]; alert: { visible: boolean; reason: string; prior_warning_state?: string | null }; tactics_used: string[]; relationships: string[]; suggested_next_action: string; limitations: string[]; extraction_mode: string; extraction_version: string; rule_version: string; schema_version: string; created_at: string; is_current: boolean; payment_context: { stated_purpose: string; amount: string | number | null; recipient_reference: string | null }; }
 interface BackendReviewerDetail extends BackendReviewStatus { reviewer_note: string | null; assessment: BackendReviewerAssessment; }
 interface BackendResolvedReview extends BackendReviewStatus { reviewer_note: string | null; idempotent_replay: boolean; }
+interface BackendAccount { account_id: string; email: string; role: Account['role']; }
 
 const idempotencyKeys = new Map<string, string>();
 const retryEventIds = new Map<string, string>();
@@ -73,6 +75,16 @@ async function request<T>(path: string, init: RequestInit = {}, options: Request
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
+}
+function mapAccount(dto: BackendAccount): Account { return { accountId: dto.account_id, email: dto.email, role: dto.role }; }
+async function ensureSession(): Promise<void> {
+  try {
+    await request('/session', { method: 'POST' }, { csrf: true });
+    return;
+  } catch (error) {
+    if (!(error instanceof ApiError && error.status === 401)) throw error;
+  }
+  await request<BackendAccount>('/auth/me');
 }
 
 const backendChannels: Record<Channel, BackendChannel> = { SMS: 'sms', WhatsApp: 'whatsapp', 'Call transcript': 'call_transcript', Email: 'email', 'Other text': 'other_text' };
@@ -156,10 +168,14 @@ function eventFor(input: { id: string; channel: Channel; text: string; order: nu
   return { event_id: input.id, channel: backendChannels[input.channel], text: input.text, source_order: input.order };
 }
 export const realApi: ApiAdapter = {
+  register: async (email, password) => { const dto = await request<BackendAccount>('/auth/register', { method: 'POST', body: JSON.stringify({ email, password }) }, { csrf: true }); return mapAccount(dto); },
+  login: async (email, password) => { const dto = await request<BackendAccount>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }, { csrf: true }); return mapAccount(dto); },
+  logout: async () => { await request<void>('/auth/logout', { method: 'POST' }, { csrf: true }); realRecordCache.clear(); },
+  getCurrentAccount: async () => mapAccount(await request<BackendAccount>('/auth/me')),
   createCase: async (input) => {
     const statedPurpose = input.requestedAction?.trim();
     if (!statedPurpose) throw new ApiError('Enter the stated payment purpose to submit this case to the connected backend.', 422, 'stated_purpose_required');
-    await request('/session', { method: 'POST' }, { csrf: true });
+    await ensureSession();
     const createScope = JSON.stringify({ channel: input.channel, amount: input.amount ?? null, recipient: input.recipient ?? null, purpose: statedPurpose });
     const event = eventFor({ id: retryEventId(`create:${createScope}`, input.conversation, 1), channel: input.channel, text: input.conversation, order: 1 });
     const payload = { consent: true, payment_context: { stated_purpose: statedPurpose, amount: input.amount?.trim() || null, recipient_reference: input.recipient?.trim() || null }, events: [event] };
@@ -217,22 +233,20 @@ export const realApi: ApiAdapter = {
     return mapReviewStatus(dto);
   },
   getReviewerQueue: async (token, limit, offset) => {
-    if (!token.trim()) throw new ApiError('Enter the reviewer token to access the restricted queue.', 401, 'reviewer_auth_required');
     const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
-    const dto = await request<BackendReviewerQueue>(`/reviewer/review-requests?${query.toString()}`, {}, { reviewerToken: token, credentials: 'omit' });
+    const dto = await request<BackendReviewerQueue>(`/reviewer/review-requests?${query.toString()}`, {}, token.trim() ? { reviewerToken: token, credentials: 'omit' } : {});
     return mapReviewerQueue(dto);
   },
   getReviewerDetail: async (token, reviewRequestId) => {
-    if (!token.trim()) throw new ApiError('Enter the reviewer token to access restricted request details.', 401, 'reviewer_auth_required');
-    const dto = await request<BackendReviewerDetail>(`/reviewer/review-requests/${encodeURIComponent(reviewRequestId)}`, {}, { reviewerToken: token, credentials: 'omit' });
+    const dto = await request<BackendReviewerDetail>(`/reviewer/review-requests/${encodeURIComponent(reviewRequestId)}`, {}, token.trim() ? { reviewerToken: token, credentials: 'omit' } : {});
     return mapReviewerDetail(dto);
   },
   resolveReviewerRequest: async (token, reviewRequestId, outcome, note) => {
-    if (!token.trim()) throw new ApiError('Enter the reviewer token to resolve a request.', 401, 'reviewer_auth_required');
     if (note !== undefined && Array.from(note).length > 1000) throw new ApiError('Reviewer notes must be 1,000 Unicode code points or fewer.', 422, 'validation_error');
     const path = `/reviewer/review-requests/${encodeURIComponent(reviewRequestId)}/resolve`;
     const payload = note === undefined || !note.trim() ? { outcome } : { outcome, reviewer_note: note };
-    const dto = await request<BackendResolvedReview>(path, { method: 'POST', body: JSON.stringify(payload) }, { reviewerToken: token, credentials: 'omit', idempotencyKey: stableIdempotencyKey(`POST:${path}`, payload) });
+    const authOptions = token.trim() ? { reviewerToken: token, credentials: 'omit' as RequestCredentials } : {};
+    const dto = await request<BackendResolvedReview>(path, { method: 'POST', body: JSON.stringify(payload) }, { ...authOptions, csrf: !token.trim(), idempotencyKey: stableIdempotencyKey(`POST:${path}`, payload) });
     return { ...mapReviewStatus(dto), reviewerNote: dto.reviewer_note, idempotentReplay: dto.idempotent_replay };
   },
   deleteCase: async (id) => { await request<void>(`/cases/${encodeURIComponent(id)}`, { method: 'DELETE' }, { csrf: true }); realRecordCache.delete(id); }

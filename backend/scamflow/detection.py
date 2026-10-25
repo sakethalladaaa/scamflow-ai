@@ -455,6 +455,13 @@ class DevelopmentMockExtractor:
         return {"status": "ok", "observations": observations}
 
 
+class RulesOnlyExtractor(DevelopmentMockExtractor):
+    """Deterministic, credential-free extractor suitable for a beta deployment."""
+
+    mode = "rules_only"
+    version = "rules-only-digital-arrest-and-refund-v1"
+
+
 def validate_extraction(
     *,
     snapshot: CaseSnapshot,

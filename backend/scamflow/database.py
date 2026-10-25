@@ -37,8 +37,30 @@ def _sqlite_url(path: Path) -> str:
     return f"sqlite+pysqlite:///{path.resolve()}"
 
 
+def _postgres_url(url: str) -> str:
+    """Normalize Railway's postgres URL for psycopg 3."""
+
+    if url.startswith("postgres://"):
+        return "postgresql+psycopg://" + url.removeprefix("postgres://")
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + url.removeprefix("postgresql://")
+    return url
+
+
 def create_database(settings: Settings) -> Database:
     """Create an engine/session factory without creating schema implicitly."""
+
+    if settings.database_url:
+        engine = create_engine(_postgres_url(settings.database_url), pool_pre_ping=True)
+        return Database(
+            engine=engine,
+            session_factory=sessionmaker(
+                bind=engine,
+                class_=Session,
+                expire_on_commit=False,
+                autoflush=False,
+            ),
+        )
 
     database_path = settings.database_path
     database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -100,6 +122,18 @@ def initialize_schema(database: Database) -> None:
     _apply_additive_migrations(database)
 
 
+def run_postgres_migrations(database: Database) -> None:
+    """Run the checked-in Alembic head for a PostgreSQL deployment."""
+
+    from alembic import command
+    from alembic.config import Config
+
+    root = Path(__file__).resolve().parents[2]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", str(database.engine.url))
+    command.upgrade(config, "head")
+
+
 def _apply_additive_migrations(database: Database) -> None:
     """Apply idempotent prototype migrations without resetting user data."""
 
@@ -120,6 +154,7 @@ def _apply_additive_migrations(database: Database) -> None:
         )
         if installed is not None:
             _apply_review_request_migration(connection)
+            _apply_account_migration(connection)
             return
 
         connection.execute(
@@ -167,6 +202,7 @@ def _apply_additive_migrations(database: Database) -> None:
             {"version": "0001_alert_memory"},
         )
         _apply_review_request_migration(connection)
+        _apply_account_migration(connection)
 
 
 def _apply_review_request_migration(connection) -> None:
@@ -273,5 +309,54 @@ def _apply_review_request_migration(connection) -> None:
         text(
             "INSERT INTO schema_migrations(version, applied_at) "
             "VALUES ('0002_review_requests', CAST(strftime('%s','now') AS INTEGER))"
+        )
+    )
+
+
+def _apply_account_migration(connection) -> None:
+    """Add account storage and link existing anonymous sessions safely."""
+
+    installed = connection.scalar(
+        text("SELECT version FROM schema_migrations WHERE version = :version"),
+        {"version": "0003_accounts"},
+    )
+    if installed is not None:
+        return
+
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS accounts (
+                id VARCHAR(32) PRIMARY KEY,
+                email VARCHAR(320) NOT NULL UNIQUE,
+                password_hash VARCHAR(256) NOT NULL,
+                role VARCHAR(16) NOT NULL DEFAULT 'user',
+                failed_login_count INTEGER NOT NULL DEFAULT 0,
+                locked_until INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                active BOOLEAN NOT NULL DEFAULT 1
+            )
+            """
+        )
+    )
+    columns = connection.execute(text("PRAGMA table_info(owner_sessions)")).fetchall()
+    if columns and not any(row[1] == "account_id" for row in columns):
+        connection.execute(
+            text(
+                "ALTER TABLE owner_sessions ADD COLUMN account_id VARCHAR(32) "
+                "REFERENCES accounts(id) ON DELETE SET NULL"
+            )
+        )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_owner_sessions_account_id "
+            "ON owner_sessions(account_id)"
+        )
+    )
+    connection.execute(
+        text(
+            "INSERT INTO schema_migrations(version, applied_at) "
+            "VALUES ('0003_accounts', CAST(strftime('%s','now') AS INTEGER))"
         )
     )

@@ -53,7 +53,8 @@ negation, and quoted warnings are included as controls.
 - Append-and-reassess workflow with current versus historical result labelling.
 - Persisted alert memory that suppresses unchanged warnings while preserving
   material escalations and prior warnings after extraction failures.
-- Anonymous owner isolation using protected cookies.
+- Account roles (`user`, `reviewer`, `admin`) with Argon2 password hashing and
+  protected HttpOnly sessions in production. Anonymous sessions remain local-only.
 - Revision control, idempotent mutations, concurrency guards, and atomic
   assessment persistence.
 - Hard case deletion with confirmation.
@@ -95,7 +96,7 @@ React + TypeScript browser
 Same-origin FastAPI API
         │
         ├── session, consent, CSRF and input validation
-        ├── owner-scoped SQLite case and ordered evidence
+        ├── owner-scoped PostgreSQL (production) or SQLite (local) case evidence
         └── immutable revision snapshot
                     │
                     ▼
@@ -127,7 +128,7 @@ revision, and idempotency state.
 | --- | --- |
 | Frontend | React 19, TypeScript 6, Vite 8 |
 | Backend | Python 3.11, FastAPI, Pydantic |
-| Persistence | SQLAlchemy, SQLite with WAL and foreign-key enforcement |
+| Persistence | SQLAlchemy + Alembic, PostgreSQL in production, SQLite locally |
 | Testing | Pytest, Vitest, React Testing Library, Playwright |
 | Packaging | Multi-stage Docker build, Docker Compose |
 | Hosting | Railway, one application replica with a persistent /data volume |
@@ -186,8 +187,9 @@ API requests to the local backend.
 docker compose up --build
 ~~~
 
-The Compose configuration runs one application instance and stores SQLite in a
-named volume at /data/scamflow.sqlite3.
+The Compose configuration runs one application instance and stores local SQLite
+in a named volume at /data/scamflow.sqlite3. Railway production uses PostgreSQL
+through `DATABASE_URL` and applies the checked-in Alembic head.
 
 ## Configuration
 
@@ -200,25 +202,36 @@ See [.env.example](.env.example) for a secret-free example.
 | SCAMFLOW_ENVIRONMENT | development | development, test, or production |
 | SCAMFLOW_LOG_LEVEL | INFO | Application log level |
 | SCAMFLOW_DATABASE_PATH | data/scamflow.sqlite3 | SQLite database location |
+| DATABASE_URL | unset | Railway PostgreSQL connection string in production |
 | SCAMFLOW_SQLITE_BUSY_TIMEOUT_MS | 5000 | SQLite contention timeout |
 | SCAMFLOW_SESSION_TTL_SECONDS | 86400 | Anonymous session lifetime |
 | SCAMFLOW_CASE_RETENTION_SECONDS | 86400 | Case access lifetime |
 | SCAMFLOW_ASSESSMENT_TIMEOUT_SECONDS | 2.0 | Extractor timeout |
+| SCAMFLOW_EXTRACTOR_MODE | rules | rules, provider, or none |
+| SCAMFLOW_MAX_REQUEST_BYTES | 1000000 | Maximum API request body |
+| SCAMFLOW_RATE_LIMIT_PER_MINUTE | 60 | Per-process API request budget |
+| SCAMFLOW_AUTH_RATE_LIMIT_PER_MINUTE | 10 | Login attempt budget |
+| SCAMFLOW_CLEANUP_INTERVAL_SECONDS | 3600 | Expired-case cleanup interval |
 | SCAMFLOW_TRUSTED_ORIGIN | http://127.0.0.1:8000 | Exact accepted browser origin |
 | SCAMFLOW_SECURE_COOKIES | environment-derived | Require Secure session cookies |
 | PORT | 8000 | Container/deployment listener |
 
-Production mode requires an HTTPS trusted origin and Secure cookies. The hosted
-development demo explicitly enables Secure cookies while retaining the
-development extractor. A production application cannot use that mock; without a
-configured real extractor, assessment requests fail safely.
+Production mode requires an HTTPS trusted origin and Secure cookies. Rules-only
+mode is deterministic, credential-free, and clearly disclosed in assessments;
+an optional provider adapter can be configured without silently falling back to
+the development mock.
 
 ## API
 
 | Method | Route | Purpose |
 | --- | --- | --- |
 | GET | /health | Exact liveness response: {"status":"ok"} |
-| POST | /session | Create or reuse an anonymous owner session |
+| GET | /ready | Database readiness response |
+| POST | /auth/register | Register and start a user session |
+| POST | /auth/login | Authenticate a user session |
+| POST | /auth/logout | Revoke the current session |
+| GET | /auth/me | Return the signed-in account and role |
+| POST | /session | Create or reuse a local anonymous owner session |
 | POST | /cases | Create a consented case and initial evidence |
 | GET | /cases/{case_id} | Read an owned, unexpired case |
 | POST | /cases/{case_id}/events | Append revision-controlled evidence |
@@ -246,8 +259,9 @@ nonexistent cases are intentionally indistinguishable.
 - Safe API envelopes do not expose SQL, raw invalid model output, cookies, or
   internal exception details.
 
-This MVP stores submitted evidence unencrypted in SQLite. Host security,
-filesystem encryption, backups, retention enforcement, and incident response
+Submitted evidence is stored unencrypted at the application layer unless the
+selected database and host provide encryption. PostgreSQL is the production
+datastore; host security, backups, retention enforcement, and incident response
 remain operator responsibilities.
 
 ## Verification
@@ -256,18 +270,18 @@ The latest local verification on 2026-10-25 completed with these results:
 
 | Check | Result |
 | --- | --- |
-| Backend test suite | 159 passed |
+| Backend test suite | 161 passed |
 | Ruff | Passed |
 | Python dependency check | No broken requirements |
 | Frontend unit tests | 6 files, 51 tests passed |
 | TypeScript typecheck | Passed |
 | Production frontend build | Passed |
 | npm audit | Failed: 6 development-toolchain advisories; production dependency audit remains separate |
-| Chromium E2E | 2 tests passed |
+| Chromium E2E | 3 tests passed |
 | Same-key append stress check | Not rerun in this release pass |
 | Development evaluation fixtures | 3/3 deterministic mock conformance |
-| Hosted browser smoke | Not verified in this release pass |
-| Railway deployment health | Blocked: Railway CLI is installed but not authenticated or linked to a project |
+| Hosted browser smoke | Passed: synthetic registration, sign-in state, rules-only case submission and evidence-backed assessment |
+| Railway deployment health | Passed: application and PostgreSQL services online; `/health` and `/ready` returned 200; Alembic initial schema applied |
 
 Run the checks:
 
@@ -293,31 +307,18 @@ They are not real-model recall, precision, or accuracy results.
 
 ## Deployment
 
-The repository contains Railway infrastructure declarations, but this checkout
-has not verified a live deployment. Authenticate and link the intended Railway
-project before applying [.railway/railway.ts](.railway/railway.ts); the historical
-demo URL is not a current health or provenance claim.
-The current topology uses:
+Railway beta topology uses a PostgreSQL service and one same-origin application
+service. Set `DATABASE_URL`, `SCAMFLOW_ENVIRONMENT=production`,
+`SCAMFLOW_TRUSTED_ORIGIN` to the exact HTTPS domain, and the remaining names in
+[.env.example](.env.example) through Railway variables only. The container runs
+the checked-in Alembic head before serving traffic and exposes `/health` for
+liveness and `/ready` for database readiness. The verified beta deployment is
+[scamflow-ai-production.up.railway.app](https://scamflow-ai-production.up.railway.app).
 
-- one application replica;
-- a 500 MB persistent volume mounted at /data;
-- SQLite at /data/scamflow.sqlite3;
-- HTTPS with an exact trusted origin and Secure cookies; and
-- /health as the deployment health check.
-
-Infrastructure is recorded in [.railway/railway.ts](.railway/railway.ts). From an
-authenticated and linked checkout:
-
-~~~bash
-cd .railway
-npm ci
-cd ..
-railway config plan
-railway up --service scamflow-ai --ci
-~~~
-
-Review the plan, current Railway documentation, and account usage before applying
-changes. Do not increase the replica count while SQLite is the datastore.
+Follow [the deployment runbook](docs/DEPLOYMENT_RUNBOOK.md) and keep
+[incident/rollback notes](docs/INCIDENT_ROLLBACK.md) with the release record.
+Do not apply the legacy `.railway/railway.ts` plan without reviewing its diff;
+it describes the old SQLite volume topology.
 
 ## Project structure
 
@@ -338,10 +339,10 @@ compose.yaml            Single-instance local container setup
 - The detector is a small, disclosed development mock with limited vocabulary.
 - No real model provider, API key, live inference, or production accuracy claim
   is included.
-- Human-review authentication, review queues, external reporting, and automated
-  retention are not implemented.
-- SQLite is a single-writer datastore and the deployment must remain at one
-  application replica.
+- Optional real-provider credentials and model evaluation remain operator choices;
+  rules-only mode is the safe default.
+- A shared external rate limiter, backup/restore drill, and assistive-technology
+  validation remain deployment responsibilities.
 - Production monitoring, backup/restore drills, and mobile assistive-technology
   validation remain pending.
 - **No strong indicators** is not a safety guarantee, and **unable to assess** is
