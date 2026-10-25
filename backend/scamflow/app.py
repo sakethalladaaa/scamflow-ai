@@ -10,7 +10,7 @@ from typing import Annotated
 from fastapi import FastAPI, Header, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -853,6 +853,12 @@ def create_app(
 
     frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
     if frontend_dist.is_dir():
+        @app.get("/reviewer", include_in_schema=False)
+        def reviewer_spa_route() -> FileResponse:
+            """Serve the SPA entrypoint so a reviewer refresh keeps its client route."""
+
+            return FileResponse(frontend_dist / "index.html")
+
         # API routes are registered first. StaticFiles' html fallback then
         # serves the production SPA from the same origin.
         app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
